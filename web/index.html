@@ -27,7 +27,8 @@
         <nav aria-label="Sections">
           <a href="#how">How it works</a>
           <a href="#safety">Safety</a>
-          <a href="#use">CLI &amp; library</a>
+          <a href="#use">Install</a>
+          <a class="ext" href="https://github.com/sawapi/pdfdiet">GitHub</a>
         </nav>
         <button class="theme" id="theme" type="button" aria-label="Switch to dark theme" title="Switch theme">
           <svg class="sun" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="3.6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M10 1.8v2.1M10 16.1v2.1M1.8 10h2.1M16.1 10h2.1M4.2 4.2l1.5 1.5M14.3 14.3l1.5 1.5M4.2 15.8l1.5-1.5M14.3 5.7l1.5-1.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -174,34 +175,69 @@
     </section>
 
     <section class="wrap section" id="use">
-      <h2>Also a CLI and a library</h2>
-      <p class="section-lead">The same engine ships on npm for the command line, Node and the browser. No Rust toolchain needed.</p>
-      <div class="code-card">
-        <div class="tabs" role="tablist" aria-label="Usage examples">
-          <button role="tab" aria-selected="true" aria-controls="ex-cli" id="tab-cli">CLI</button>
-          <button role="tab" aria-selected="false" aria-controls="ex-node" id="tab-node" tabindex="-1">Node</button>
-          <button role="tab" aria-selected="false" aria-controls="ex-web" id="tab-web" tabindex="-1">Browser</button>
-          <button class="copy" type="button" id="copy">Copy</button>
+      <h2>Use it from the command line or in your code</h2>
+      <p class="section-lead">The same engine ships as a Rust crate and as an npm package, each with a command-line tool and a library.</p>
+
+      <div class="lang">
+        <div class="lang-head">
+          <h3>Rust</h3>
+          <div class="install"><code>cargo install pdfdiet</code><button class="copy-cmd" type="button" data-copy="cargo install pdfdiet">Copy</button></div>
+          <div class="install"><code>cargo add pdfdiet</code><button class="copy-cmd" type="button" data-copy="cargo add pdfdiet">Copy</button></div>
         </div>
-        <pre role="tabpanel" id="ex-cli" aria-labelledby="tab-cli"><code><span class="c"># see what a file is made of: images, encodings, measured DPI</span>
-npx pdfdiet inspect report.pdf
+        <p class="lang-note">Rust 1.88 or later. <code>cargo install</code> gives you the command-line tool; as a library, add <code>default-features = false</code> to leave the argument parser out. API documentation is on <a href="https://docs.rs/pdfdiet">docs.rs</a>.</p>
+        <div class="code-card">
+          <div class="tabs" role="tablist" aria-label="Rust examples">
+            <button role="tab" aria-selected="true" aria-controls="ex-rs-cli" id="tab-rs-cli">CLI</button>
+            <button role="tab" aria-selected="false" aria-controls="ex-rs-lib" id="tab-rs-lib" tabindex="-1">Library</button>
+            <button class="copy" type="button">Copy</button>
+          </div>
+          <pre role="tabpanel" id="ex-rs-cli" aria-labelledby="tab-rs-cli"><code><span class="c"># see what a file is made of: images, encodings, measured DPI</span>
+pdfdiet inspect report.pdf
 
 <span class="c"># compress (defaults: --dpi 150 --quality 80)</span>
-npx pdfdiet compress report.pdf -o report.small.pdf
+pdfdiet compress report.pdf -o report.small.pdf
 
 <span class="c"># opt-ins</span>
-npx pdfdiet compress in.pdf -o out.pdf --subset-outlines --strip-jpeg-metadata</code></pre>
-        <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress_pdf } from "pdfdiet";
+pdfdiet compress in.pdf -o out.pdf --subset-outlines --strip-jpeg-metadata</code></pre>
+          <pre role="tabpanel" id="ex-rs-lib" aria-labelledby="tab-rs-lib" hidden><code>use pdfdiet::{compress_bytes, CompressOptions};
+
+let input = std::fs::read("in.pdf")?;
+let opts = CompressOptions { target_dpi: 150.0, jpeg_quality: 80, ..Default::default() };
+let (output, stats) = compress_bytes(&amp;input, &amp;opts)?;
+std::fs::write("out.pdf", output)?;
+<span class="c">// what was changed, and what was left alone and why</span>
+for line in &amp;stats.log { println!("{line}"); }</code></pre>
+        </div>
+      </div>
+
+      <div class="lang">
+        <div class="lang-head">
+          <h3>JavaScript</h3>
+          <div class="install"><code>npm install pdfdiet</code><button class="copy-cmd" type="button" data-copy="npm install pdfdiet">Copy</button></div>
+        </div>
+        <p class="lang-note">Node 22 or later, and current browsers through any bundler. One WebAssembly file (about 580 KB gzipped), no native binaries, TypeScript types included. The full API is in the <a href="https://www.npmjs.com/package/pdfdiet">package README</a>.</p>
+        <div class="code-card">
+          <div class="tabs" role="tablist" aria-label="JavaScript examples">
+            <button role="tab" aria-selected="true" aria-controls="ex-js-cli" id="tab-js-cli">CLI</button>
+            <button role="tab" aria-selected="false" aria-controls="ex-node" id="tab-node" tabindex="-1">Node</button>
+            <button role="tab" aria-selected="false" aria-controls="ex-web" id="tab-web" tabindex="-1">Browser</button>
+            <button class="copy" type="button">Copy</button>
+          </div>
+          <pre role="tabpanel" id="ex-js-cli" aria-labelledby="tab-js-cli"><code><span class="c"># no install needed</span>
+npx pdfdiet inspect report.pdf
+npx pdfdiet compress report.pdf -o report.small.pdf</code></pre>
+          <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress_pdf } from "pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const res = compress_pdf(readFileSync("in.pdf"), 150, 80); <span class="c">// bytes, dpi, quality</span>
 writeFileSync("out.pdf", res.output);
 console.log(res.log);</code></pre>
-        <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import init, { compress_pdf } from "pdfdiet/web";
+          <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import init, { compress_pdf } from "pdfdiet/web";
 
-await init(); <span class="c">// fetches and instantiates the .wasm</span>
+await init(); <span class="c">// loads the .wasm file once</span>
 const res = compress_pdf(new Uint8Array(await file.arrayBuffer()), 150, 80);
 const blob = new Blob([res.output], { type: "application/pdf" });</code></pre>
+        </div>
       </div>
     </section>
   </main>

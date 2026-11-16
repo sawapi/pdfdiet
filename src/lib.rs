@@ -1,7 +1,30 @@
-//! pdfdiet — squeeze PDFs by downsampling and recompressing embedded images.
+//! pdfdiet — squeeze PDFs by downsampling and recompressing embedded images,
+//! and by optimizing fonts and structure losslessly.
 //!
-//! The core API is filesystem-agnostic (`&[u8]` in/out) so it can be used
-//! from both the CLI and WASM.
+//! The core API is filesystem-agnostic (`&[u8]` in, `Vec<u8>` out):
+//!
+//! ```no_run
+//! use pdfdiet::{compress_bytes, CompressOptions};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let input = std::fs::read("in.pdf")?;
+//! let opts = CompressOptions { target_dpi: 150.0, jpeg_quality: 80, ..Default::default() };
+//! let (output, stats) = compress_bytes(&input, &opts)?;
+//! std::fs::write("out.pdf", output)?;
+//! // what was changed, and what was left alone and why
+//! for line in &stats.log {
+//!     println!("{line}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Documents that cannot be changed safely (encrypted, owner-password
+//! protected or digitally signed) are refused with [`Error::Refused`]
+//! unless [`CompressOptions`] explicitly allows it.
+//!
+//! The command-line tool is behind the default `cli` feature; library users
+//! can depend on the crate with `default-features = false`.
 
 // Style lints whose suggested rewrites would not make this code clearer:
 // the font passes index parallel tables by glyph id, and a few internal

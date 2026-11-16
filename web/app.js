@@ -204,40 +204,47 @@ for (const id of ["again", "errAgain"]) {
   $(id).addEventListener("click", () => {
     file = null;
     setState("idle");
-    $("file").click();
+    $("file").focus();
   });
 }
 
 // ---- code tabs ----------------------------------------------------------
-const tabs = [...document.querySelectorAll('.tabs [role="tab"]')];
-function select(tab) {
-  for (const t of tabs) {
-    const on = t === tab;
-    t.setAttribute("aria-selected", on);
-    t.tabIndex = on ? 0 : -1;
-    $(t.getAttribute("aria-controls")).hidden = !on;
-  }
-}
-tabs.forEach((t, i) => {
-  t.addEventListener("click", () => select(t));
-  t.addEventListener("keydown", (e) => {
-    const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
-    if (!d) return;
-    const next = tabs[(i + d + tabs.length) % tabs.length];
-    select(next);
-    next.focus();
+// Each code card has its own tab set.
+for (const card of document.querySelectorAll(".code-card")) {
+  const tabs = [...card.querySelectorAll('[role="tab"]')];
+  const select = (tab) => {
+    for (const t of tabs) {
+      const on = t === tab;
+      t.setAttribute("aria-selected", on);
+      t.tabIndex = on ? 0 : -1;
+      $(t.getAttribute("aria-controls")).hidden = !on;
+    }
+  };
+  tabs.forEach((t, i) => {
+    t.addEventListener("click", () => select(t));
+    t.addEventListener("keydown", (e) => {
+      const d = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+      if (!d) return;
+      const next = tabs[(i + d + tabs.length) % tabs.length];
+      select(next);
+      next.focus();
+    });
   });
-});
-$("copy").addEventListener("click", async () => {
-  const panel = document.querySelector('.code-card [role="tabpanel"]:not([hidden])');
+  const copy = card.querySelector(".copy");
+  copy.addEventListener("click", () => copyText(copy, card.querySelector('[role="tabpanel"]:not([hidden])').textContent));
+}
+for (const b of document.querySelectorAll(".copy-cmd")) {
+  b.addEventListener("click", () => copyText(b, b.dataset.copy));
+}
+async function copyText(button, text) {
   try {
-    await navigator.clipboard.writeText(panel.textContent);
-    $("copy").textContent = "Copied";
+    await navigator.clipboard.writeText(text);
+    button.textContent = "Copied";
   } catch {
-    $("copy").textContent = "Select & copy";
+    button.textContent = "Select & copy";
   }
-  setTimeout(() => ($("copy").textContent = "Copy"), 1500);
-});
+  setTimeout(() => (button.textContent = "Copy"), 1500);
+}
 
 // ---- theme --------------------------------------------------------------
 // Follows the OS until the button is used; the choice is remembered.
