@@ -1,0 +1,16 @@
+[package]
+name = "pdfdiet-wasm"
+version = "0.1.0"
+edition = "2024"
+description = "wasm-bindgen bindings for pdfdiet (PDF compression in the browser and Node)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pdfdiet = { path = "..", default-features = false }
+lopdf = { version = "0.44.0", default-features = false, features = ["jiff", "wasm_js"] }
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"

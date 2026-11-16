@@ -1,0 +1,55 @@
+{
+  "name": "pdfdiet",
+  "version": "0.1.0",
+  "description": "Put PDFs on a diet: measured-DPI image downsampling plus lossless font and structure optimization. Permissively-licensed CLI + WASM library for Node and the browser.",
+  "license": "(MIT OR Apache-2.0)",
+  "bin": {
+    "pdfdiet": "./bin/pdfdiet.mjs"
+  },
+  "main": "./node/pdfdiet_wasm.js",
+  "types": "./node/pdfdiet_wasm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./node/pdfdiet_wasm.d.ts",
+      "node": "./node/pdfdiet_wasm.js",
+      "default": "./web/pdfdiet_wasm.js"
+    },
+    "./web": {
+      "types": "./web/pdfdiet_wasm.d.ts",
+      "default": "./web/pdfdiet_wasm.js"
+    }
+  },
+  "files": [
+    "bin",
+    "node",
+    "web",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD_PARTY.md"
+  ],
+  "keywords": [
+    "pdf",
+    "compress",
+    "shrink",
+    "optimize",
+    "downsample",
+    "wasm",
+    "lossless",
+    "fonts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sawapi/pdfdiet.git"
+  },
+  "homepage": "https://github.com/sawapi/pdfdiet",
+  "bugs": {
+    "url": "https://github.com/sawapi/pdfdiet/issues"
+  },
+  "author": "sawapi",
+  "scripts": {
+    "prepack": "node -e \"require('fs').accessSync('node/pdfdiet_wasm_bg.wasm')\" || (cd .. && ./build-npm.sh)"
+  }
+}

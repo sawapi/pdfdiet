@@ -1,0 +1,43 @@
+[package]
+name = "pdfdiet"
+version = "0.1.0"
+edition = "2024"
+description = "Put PDFs on a diet: measured-DPI image downsampling plus lossless font and structure optimization, under a permissive license."
+license = "MIT OR Apache-2.0"
+keywords = ["pdf", "compress", "optimize", "shrink"]
+categories = ["command-line-utilities", "compression", "multimedia::images"]
+repository = "https://github.com/sawapi/pdfdiet"
+# 1.88 for let-chains (and smallpeg's own minimum). Checked by the msrv job in CI.
+rust-version = "1.88"
+readme = "README.md"
+# The published package is the library, the CLI and the robustness example.
+# Leading slashes anchor each pattern at the root (npm/ has its own copies).
+include = [
+    "/src/**",
+    "/examples/mutpdf.rs",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/THIRD_PARTY.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+]
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"], optional = true }
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+smallpeg = { path = "../smallpeg", version = "0.13" }
+lopdf = { version = "0.44.0", default-features = false, features = ["jiff"] }
+
+[features]
+# The command-line tool. Library users can opt out with
+# `default-features = false` to drop the argument parser.
+default = ["cli"]
+cli = ["dep:clap"]
+
+[[bin]]
+name = "pdfdiet"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[workspace]
+members = [".", "wasm"]

@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # smallpeg is developed alongside as a sibling path dependency; check
+      # both out side by side so `path = "../smallpeg"` resolves.
+      - uses: actions/checkout@v4
+        with:
+          path: pdfdiet
+      - uses: actions/checkout@v4
+        with:
+          repository: sawapi/smallpeg
+          path: smallpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pdfdiet
+      - name: Clippy
+        working-directory: pdfdiet
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Clippy (wasm bindings)
+        working-directory: pdfdiet
+        run: cargo clippy --release -p pdfdiet-wasm --target wasm32-unknown-unknown -- -D warnings
+      - name: Tests
+        working-directory: pdfdiet
+        run: cargo test --release
+      - name: Library without the CLI
+        working-directory: pdfdiet
+        run: cargo check --no-default-features
+      - name: Docs
+        working-directory: pdfdiet
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Package check (against the published smallpeg)
+        working-directory: pdfdiet
+        run: cargo publish --dry-run --allow-dirty
+
+  msrv:
+    # rust-version in Cargo.toml is a promise; this keeps it honest.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pdfdiet
+      - uses: actions/checkout@v4
+        with:
+          repository: sawapi/smallpeg
+          path: smallpeg
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pdfdiet
+      - name: Build at the declared MSRV
+        working-directory: pdfdiet
+        run: cargo build --release
