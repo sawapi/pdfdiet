@@ -29,6 +29,7 @@
 // Style lints whose suggested rewrites would not make this code clearer:
 // the font passes index parallel tables by glyph id, and a few internal
 // helpers return tuples or take many plain parameters.
+#![forbid(unsafe_code)]
 #![allow(clippy::needless_range_loop, clippy::type_complexity, clippy::too_many_arguments)]
 
 use std::collections::HashMap;

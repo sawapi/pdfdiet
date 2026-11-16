@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.1
+
+- The npm package is `@sawapi/pdfdiet` (`npx @sawapi/pdfdiet ...`); the
+  command it installs is still `pdfdiet`. The README now says so.
+- Package metadata points to the landing page,
+  https://sawapi.github.io/pdfdiet/.
+- The WebAssembly module is size-optimized: 1.8 MB down to 1.4 MB.
+- Releases are published from CI with trusted publishing.
+- The library and CLI forbid unsafe code.
+
 ## 0.1.0
 
 First public release.

@@ -49,6 +49,45 @@ jobs:
         working-directory: pdfdiet
         run: cargo publish --dry-run --allow-dirty
 
+  npm:
+    # The WebAssembly build and the npm package made from it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pdfdiet
+      - uses: actions/checkout@v4
+        with:
+          repository: sawapi/smallpeg
+          path: smallpeg
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pdfdiet
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install wasm-bindgen CLI (the version in Cargo.lock)
+        working-directory: pdfdiet
+        run: |
+          v=$(grep -A1 'name = "wasm-bindgen"' Cargo.lock | grep version | head -1 | cut -d'"' -f2)
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - name: Install Binaryen (wasm-opt)
+        run: |
+          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/binaryen-version_116/bin" >> "$GITHUB_PATH"
+      - name: Build
+        working-directory: pdfdiet
+        run: ./build-npm.sh
+      - name: Test
+        working-directory: pdfdiet
+        run: node npm/test.mjs
+      - name: Pack
+        working-directory: pdfdiet/npm
+        run: npm pack --dry-run
+
   msrv:
     # rust-version in Cargo.toml is a promise; this keeps it honest.
     runs-on: ubuntu-latest
