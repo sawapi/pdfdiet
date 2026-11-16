@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["pdf", "compress", "optimize", "shrink"]
 categories = ["command-line-utilities", "compression", "multimedia::images"]
 repository = "https://github.com/sawapi/pdfdiet"
+homepage = "https://sawapi.github.io/pdfdiet/"
 # 1.88 for let-chains (and smallpeg's own minimum). Checked by the msrv job in CI.
 rust-version = "1.88"
 readme = "README.md"
