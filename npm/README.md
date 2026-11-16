@@ -11,8 +11,8 @@ nothing is uploaded anywhere.
 ## CLI
 
 ```sh
-npx pdfdiet compress scanned.pdf -o small.pdf          # defaults: --dpi 150 --quality 80
-npx pdfdiet inspect scanned.pdf                        # list images with measured effective DPI
+npx @sawapi/pdfdiet compress scanned.pdf -o small.pdf          # defaults: --dpi 150 --quality 80
+npx @sawapi/pdfdiet inspect scanned.pdf                        # list images with measured effective DPI
 ```
 
 On the project's own test corpus, a 300 dpi scanned page lands around 90%
@@ -22,7 +22,7 @@ its original size. Run `inspect` first to see what a given file is made of.
 ## Node API
 
 ```js
-import { compress_pdf, inspect_pdf } from "pdfdiet";
+import { compress_pdf, inspect_pdf } from "@sawapi/pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const input = readFileSync("in.pdf");
@@ -42,7 +42,7 @@ console.log(res.log, res.images_recompressed, res.images_total);
 The browser build is WASM behind an explicit async init:
 
 ```js
-import init, { compress_pdf } from "pdfdiet/web";
+import init, { compress_pdf } from "@sawapi/pdfdiet/web";
 
 await init(); // fetches and instantiates the .wasm
 const res = compress_pdf(new Uint8Array(await file.arrayBuffer()), 150, 80);
@@ -50,7 +50,7 @@ const blob = new Blob([res.output], { type: "application/pdf" });
 ```
 
 Bundlers that understand the `exports` map will also resolve the bare
-`"pdfdiet"` import to the browser build outside Node.
+`"@sawapi/pdfdiet"` import to the browser build outside Node.
 
 ## Safety model
 

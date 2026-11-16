@@ -26,10 +26,10 @@ said out loud in the log rather than silently.
 Via npm (recommended — CLI + Node/browser library, no Rust toolchain needed):
 
 ```
-npx pdfdiet inspect  file.pdf             # list images: size, colorspace, filters, measured DPI
-npx pdfdiet compress in.pdf -o out.pdf    # defaults: --dpi 150 --quality 80
-npx pdfdiet compress in.pdf -o out.pdf --subset-outlines   # also drop unused glyph outlines
-npx pdfdiet compress in.pdf -o out.pdf --strip-jpeg-metadata   # remove EXIF/GPS etc. from JPEGs
+npx @sawapi/pdfdiet inspect  file.pdf             # list images: size, colorspace, filters, measured DPI
+npx @sawapi/pdfdiet compress in.pdf -o out.pdf    # defaults: --dpi 150 --quality 80
+npx @sawapi/pdfdiet compress in.pdf -o out.pdf --subset-outlines   # also drop unused glyph outlines
+npx @sawapi/pdfdiet compress in.pdf -o out.pdf --strip-jpeg-metadata   # remove EXIF/GPS etc. from JPEGs
 ```
 
 `--subset-outlines` additionally empties the outlines of embedded glyphs

@@ -213,9 +213,9 @@ for line in &amp;stats.log { println!("{line}"); }</code></pre>
       <div class="lang">
         <div class="lang-head">
           <h3>JavaScript</h3>
-          <div class="install"><code>npm install pdfdiet</code><button class="copy-cmd" type="button" data-copy="npm install pdfdiet">Copy</button></div>
+          <div class="install"><code>npm install @sawapi/pdfdiet</code><button class="copy-cmd" type="button" data-copy="npm install @sawapi/pdfdiet">Copy</button></div>
         </div>
-        <p class="lang-note">Node 22 or later, and current browsers through any bundler. One WebAssembly file (about 580 KB gzipped), no native binaries, TypeScript types included. The full API is in the <a href="https://www.npmjs.com/package/pdfdiet">package README</a>.</p>
+        <p class="lang-note">Node 22 or later, and current browsers through any bundler. One WebAssembly file (about 580 KB gzipped), no native binaries, TypeScript types included. The full API is in the <a href="https://www.npmjs.com/package/@sawapi/pdfdiet">package README</a>.</p>
         <div class="code-card">
           <div class="tabs" role="tablist" aria-label="JavaScript examples">
             <button role="tab" aria-selected="true" aria-controls="ex-js-cli" id="tab-js-cli">CLI</button>
@@ -224,15 +224,15 @@ for line in &amp;stats.log { println!("{line}"); }</code></pre>
             <button class="copy" type="button">Copy</button>
           </div>
           <pre role="tabpanel" id="ex-js-cli" aria-labelledby="tab-js-cli"><code><span class="c"># no install needed</span>
-npx pdfdiet inspect report.pdf
-npx pdfdiet compress report.pdf -o report.small.pdf</code></pre>
-          <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress_pdf } from "pdfdiet";
+npx @sawapi/pdfdiet inspect report.pdf
+npx @sawapi/pdfdiet compress report.pdf -o report.small.pdf</code></pre>
+          <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress_pdf } from "@sawapi/pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const res = compress_pdf(readFileSync("in.pdf"), 150, 80); <span class="c">// bytes, dpi, quality</span>
 writeFileSync("out.pdf", res.output);
 console.log(res.log);</code></pre>
-          <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import init, { compress_pdf } from "pdfdiet/web";
+          <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import init, { compress_pdf } from "@sawapi/pdfdiet/web";
 
 await init(); <span class="c">// loads the .wasm file once</span>
 const res = compress_pdf(new Uint8Array(await file.arrayBuffer()), 150, 80);
