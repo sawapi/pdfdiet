@@ -23,6 +23,13 @@
   written, prints a one-line error; `--dpi` and `--quality` are checked (an
   out-of-range quality used to wrap around silently).
 
+### Documentation
+
+- The READMEs follow the usual crate and npm layout (install, example,
+  features, requirements), with the details moved to `docs/`: what it
+  does, the command line, safety, limitations, the JavaScript API and
+  development. The website's code samples are syntax-colored.
+
 ### Rust
 
 - `CompressOptions`, `CompressStats`, `Error` and `Refusal` are

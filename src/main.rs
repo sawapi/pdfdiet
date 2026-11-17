@@ -38,9 +38,9 @@ enum Cmd {
         /// Process a digitally signed document, invalidating its signatures
         #[arg(long)]
         break_signatures: bool,
-        /// Also drop the outlines of embedded TrueType glyphs that no text
-        /// in the document uses (smaller, but the fonts can no longer show
-        /// new text added later)
+        /// Also drop the outlines of embedded glyphs (TrueType, and CID-keyed
+        /// CFF) that no text in the document uses (smaller, but the fonts
+        /// can no longer show new text added later)
         #[arg(long)]
         subset_outlines: bool,
         /// Remove EXIF (GPS, camera, dates), XMP and other metadata from

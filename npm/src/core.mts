@@ -20,9 +20,9 @@ export interface CompressOptions {
    */
   breakSignatures?: boolean | undefined;
   /**
-   * Also drop the outlines of embedded TrueType glyphs that no text in the
-   * document uses. Smaller, but the fonts can no longer show text added
-   * later. Default false.
+   * Also drop the outlines of embedded glyphs (TrueType, and CID-keyed CFF)
+   * that no text in the document uses. Smaller, but the fonts can no longer
+   * show text added later. Default false.
    */
   subsetOutlines?: boolean | undefined;
   /** Remove EXIF (GPS, camera, dates), XMP and other metadata from embedded JPEGs, losslessly. Default false. */
@@ -70,7 +70,7 @@ export interface ImageInfo {
   width: number;
   height: number;
   bitsPerComponent: number;
-  /** Color space, e.g. `"DeviceRGB"`, `"ICCBased(3)"`, `"Indexed"`. */
+  /** Color space, e.g. `"DeviceRGB"`, `"ICCBased(N=3)"`, `"Indexed"`. */
   colorSpace: string;
   /** Color components per pixel, or null when not known. */
   components: number | null;

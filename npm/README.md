@@ -1,127 +1,90 @@
 # pdfdiet
 
-Put your PDFs on a diet — measured-DPI image downsampling, lossless font and
-structure optimization, and a hard rule that anything it cannot prove safe is
-left byte-for-byte untouched. Permissively licensed (MIT OR Apache-2.0),
-written in Rust, shipped as WASM.
+[![npm](https://img.shields.io/npm/v/@sawapi/pdfdiet.svg)](https://www.npmjs.com/package/@sawapi/pdfdiet)
+[![CI](https://github.com/sawapi/pdfdiet/actions/workflows/ci.yml/badge.svg)](https://github.com/sawapi/pdfdiet/actions/workflows/ci.yml)
+[![license](https://img.shields.io/npm/l/@sawapi/pdfdiet.svg)](#license)
 
-Works as a CLI, in Node, and in the browser. All processing is local —
-nothing is uploaded anywhere.
+Makes PDFs smaller, from the command line, in Node or in the browser:
+images are resampled to the resolution they are actually drawn at, and
+fonts and structure are optimized losslessly. Anything it cannot handle
+with confidence is left as it was. WebAssembly compiled from a Rust
+library, with TypeScript types; nothing is uploaded anywhere.
 
-## CLI
+[Website](https://sawapi.github.io/pdfdiet/) ·
+[API](https://github.com/sawapi/pdfdiet/blob/main/docs/npm-api.md) ·
+[GitHub](https://github.com/sawapi/pdfdiet) ·
+[Changelog](https://github.com/sawapi/pdfdiet/blob/main/CHANGELOG.md)
+
+## Install
 
 ```sh
-npx @sawapi/pdfdiet compress scanned.pdf -o small.pdf          # defaults: --dpi 150 --quality 80
-npx @sawapi/pdfdiet inspect scanned.pdf                        # list images with measured effective DPI
+npx @sawapi/pdfdiet --help     # run without installing
+npm install @sawapi/pdfdiet    # the library (and the CLI, for npx and package scripts)
 ```
 
-On the project's own test corpus, a 300 dpi scanned page lands around 90%
-smaller at default settings, and a font-heavy 15-page paper lands at 44% of
-its original size. Run `inspect` first to see what a given file is made of.
+## Command line
 
-## Node API
+```sh
+npx @sawapi/pdfdiet inspect report.pdf                        # images, encodings, measured resolution
+npx @sawapi/pdfdiet compress report.pdf -o report.small.pdf   # defaults: --dpi 150 --quality 80
+```
+
+Options: `--dpi`, `--quality`, `--subset-outlines`,
+`--strip-jpeg-metadata`, `--strip-protection`, `--break-signatures`. See
+the [command line guide](https://github.com/sawapi/pdfdiet/blob/main/docs/cli.md).
+
+## Node
 
 ```js
-import { compress, inspect, PdfdietError } from "@sawapi/pdfdiet";
+import { compress } from "@sawapi/pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const input = readFileSync("in.pdf");
-const res = compress(input); // defaults: { dpi: 150, quality: 80 }
-writeFileSync("out.pdf", res.output);
-console.log(res.log.join("\n")); // what changed, and what was left alone and why
-console.log(`${res.imagesRecompressed} of ${res.imagesTotal} images recompressed`);
+const res = compress(readFileSync("report.pdf"), { dpi: 150 });
+writeFileSync("report.small.pdf", res.output);
+console.log(res.log.join("\n")); // what was changed, and what was left alone and why
 ```
 
-Options (all optional):
-
-| option | default | |
-| --- | --- | --- |
-| `dpi` | 150 | target effective DPI; images drawn at a higher resolution are downsampled |
-| `quality` | 80 | JPEG quality for re-encoded images, 1-100 |
-| `subsetOutlines` | false | also drop embedded TrueType glyph outlines no text uses (smaller; the fonts can no longer show text added later) |
-| `stripJpegMetadata` | false | remove EXIF (GPS, camera, dates), XMP and other metadata from embedded JPEGs, losslessly |
-| `stripProtection` | false | process a document protected only by an owner password, removing its permission restrictions |
-| `breakSignatures` | false | process a digitally signed document, invalidating its signatures |
-
-`inspect(input)` lists the images, each with its pixel size, color space,
-filters, encoded size, the largest size it is drawn at (`drawnSize`, in
-inches) and the resulting effective resolution (`dpi: { x, y }`).
-
-A wrong argument type throws a `TypeError` and an out-of-range `dpi` or
-`quality` a `RangeError`. Documents that are not processed throw a
-`PdfdietError` whose `reason` is
-one of `"invalid-pdf"`, `"encrypted"`, `"protected"`, `"signed"` or
-`"empty"`:
-
-```js
-try {
-  compress(input);
-} catch (e) {
-  if (e instanceof PdfdietError && e.reason === "signed") {
-    // compress(input, { breakSignatures: true }) to go ahead anyway
-  }
-}
-```
-
-Type declarations are included (they need TypeScript 5.7 or later, for
-`Uint8Array<ArrayBuffer>`). The package is ESM; `require()` works
-too on Node 22.12 or later. TypeScript resolves the types under any
-`node16`-or-later or `bundler` module resolution; CommonJS (`.cts`) code
-that `require`s it needs `"module": "nodenext"` (TypeScript 5.8 or later).
-
-## Browser API
-
-The browser build loads its WASM asynchronously, once:
+## Browser
 
 ```js
 import { init, compress } from "@sawapi/pdfdiet/web";
 
-await init(); // fetches and instantiates the package's web/pdfdiet_wasm_bg.wasm
+await init(); // loads the .wasm file once
 const res = compress(new Uint8Array(await file.arrayBuffer()));
 const blob = new Blob([res.output], { type: "application/pdf" });
 ```
 
-`init()` also takes a URL, a `Response` (or a promise of one, such as
-`fetch(url)`), the bytes or a compiled `WebAssembly.Module` if the `.wasm`
-file is served from elsewhere. `initSync(bytes)` loads it synchronously
-(best in a worker; it throws while an `init()` is still loading), and
-`init` is also the default export. The 0.1.x forms
-`init({ module_or_path })` and `initSync({ module })` still work.
+Compression is synchronous; for large files, run it in a Web Worker.
 
-Bundlers that understand the `exports` map resolve the bare
-`"@sawapi/pdfdiet"` import to the browser build outside Node. The Node
-build exports the same `init`, `initSync` and default export as no-ops, so
-code written for the browser also runs under Node (server-side rendering,
-tests).
+## Features
 
-## Safety model
+- **Measures** the resolution each image is drawn at, and downsamples only
+  images above the target.
+- **Re-encodes** gray, RGB and CMYK images as JPEG and bilevel scans
+  losslessly, keeping the original whenever it is smaller.
+- **Optimizes fonts and structure**: merges duplicates, drops what no page
+  can reach.
+- **Leaves alone** what it cannot decode exactly. It refuses encrypted
+  documents, and owner-password-protected or signed ones unless told
+  otherwise.
 
-- Effective DPI is **measured**, not guessed: every page's content stream is
-  interpreted (transform tracking, nested Form XObjects, soft-mask
-  propagation), so an image placed small on the page is downsampled
-  correctly and no more.
-- Bilevel scans are recompressed **losslessly** (CCITT G4); JPEGs that can't
-  be beaten are entropy-optimized losslessly; a size guard keeps original
-  bytes whenever recompression would lose.
-- Fonts are only rewritten under proof: provably-identical subsets merge,
-  unreachable glyph outlines drop without renumbering, Type 1 programs
-  convert to CFF with documented numeric fidelity.
-- Forms, annotations and accessibility structure are never flattened or
-  dropped. Anything undecodable (JPX, image masks, TIFF-predictor-filtered
-  or color-key-masked images) passes through byte-for-byte.
-- Encrypted, permission-protected and digitally signed documents are refused
-  rather than quietly stripped of their protection or their signature.
-- In development, the lossless transforms are held to bit-identical page
-  renders across several renderers over a fixed corpus. That is a
-  regression check, not a per-file guarantee — see the repository README
-  for what it does and does not cover.
+| Function | Returns |
+|---|---|
+| `compress(pdf, { dpi, quality, subsetOutlines, stripJpegMetadata, stripProtection, breakSignatures })` | `{ output, log, imagesTotal, imagesRecompressed }` |
+| `inspect(pdf)` | One entry per image: size, color space, filters, bytes, drawn size, `dpi` |
+| `init(wasm?)`, `initSync(bytes)` | Load the browser build (no-ops in Node) |
 
-## Clean-room note
+Documents that are not processed throw a `PdfdietError` whose `reason` is
+`"invalid-pdf"`, `"encrypted"`, `"protected"`, `"signed"` or `"empty"`.
+Details, options and errors are in the
+[API documentation](https://github.com/sawapi/pdfdiet/blob/main/docs/npm-api.md).
 
-Written from public specifications (ISO 32000, ITU-T T.6/T.81, OpenType,
-Adobe Type 1/CFF) and observed behavior only. See THIRD_PARTY.md in the
-repository for the full provenance record.
+## Requirements
+
+Node 22.12 or later, or a current browser (directly or through a bundler).
+TypeScript types need TypeScript 5.7 or later.
 
 ## License
 
-MIT OR Apache-2.0, at your option.
+MIT OR Apache-2.0, at your option. The Rust library is
+[`pdfdiet` on crates.io](https://crates.io/crates/pdfdiet).
