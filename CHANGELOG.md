@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Website: a document refused for its owner password (restrictions on
+  printing, copying or editing) now offers a button to remove the
+  restrictions and compress it. The choice is per file, and the result
+  says the restrictions were removed. Encrypted and signed documents are
+  still never processed on the page.
+
 ## 0.2.0
 
 ### npm

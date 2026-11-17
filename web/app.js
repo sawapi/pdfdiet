@@ -50,7 +50,7 @@ function restart() {
 spawn();
 
 // ---- input --------------------------------------------------------------
-let file = null; // { name, bytes: ArrayBuffer }
+let file = null; // { name, bytes: ArrayBuffer, stripProtection: boolean }
 let pendingRun = false;
 
 async function takeFile(f) {
@@ -60,7 +60,8 @@ async function takeFile(f) {
     showError(f.name, "That doesn't look like a PDF.");
     return;
   }
-  file = { name: f.name, bytes: await f.arrayBuffer() };
+  // Removing owner-password restrictions is chosen per file, after a refusal.
+  file = { name: f.name, bytes: await f.arrayBuffer(), stripProtection: false };
   run();
 }
 
@@ -127,13 +128,13 @@ function run() {
   const id = ++jobId;
   const t0 = performance.now();
   running = {
-    id, name: file.name, size: file.bytes.byteLength, t0,
+    id, name: file.name, size: file.bytes.byteLength, t0, stripped: file.stripProtection,
     timer: setInterval(() => ($("elapsed").textContent = ((performance.now() - t0) / 1000).toFixed(1)), 100),
   };
   $("elapsed").textContent = "0.0";
   // Copy: the original stays here so settings can be changed and re-run.
   const input = file.bytes.slice(0);
-  worker.postMessage({ id, input, ...settings() }, [input]);
+  worker.postMessage({ id, input, ...settings(), stripProtection: file.stripProtection }, [input]);
 }
 function stopTimer() {
   if (running) clearInterval(running.timer);
@@ -144,7 +145,7 @@ function finish(res) {
   stopTimer();
   running = null;
   if (!res.ok) {
-    showError(job.name, friendlyError(res.reason, res.error));
+    showError(job.name, friendlyError(res.reason, res.error), res.reason === "protected");
     return;
   }
   const before = job.size;
@@ -171,7 +172,8 @@ function finish(res) {
   const imgs = res.imagesTotal
     ? `${res.imagesRecompressed} of ${res.imagesTotal} image${res.imagesTotal === 1 ? "" : "s"} recompressed`
     : "no images";
-  $("meta").textContent = `${imgs} · ${(res.ms / 1000).toFixed(1)} s`;
+  $("meta").textContent =
+    `${imgs} · ${(res.ms / 1000).toFixed(1)} s` + (job.stripped && !kept ? " · restrictions removed" : "");
   $("log").textContent = res.log || "(nothing to report)";
 
   const a = $("download");
@@ -182,16 +184,25 @@ function finish(res) {
 }
 
 function friendlyError(reason, msg) {
-  if (reason === "encrypted" || reason === "protected") return "This PDF is password-protected or encrypted, so it was left alone.";
+  if (reason === "encrypted") return "This PDF is encrypted with a password, so it can't be read and was left alone.";
+  if (reason === "protected") {
+    return "This PDF has an owner password that may restrict printing, copying or editing, so it was left alone.";
+  }
   if (reason === "signed") return "This PDF is digitally signed; changing it would invalidate the signature, so it was left alone.";
   if (reason === "empty") return "This PDF has no readable pages.";
   return msg ? "Couldn't process this PDF: " + msg : "Something went wrong.";
 }
-function showError(name, msg) {
+function showError(name, msg, offerStrip = false) {
   $("errName").textContent = name;
   $("errMsg").textContent = msg;
+  $("errStrip").hidden = !(offerStrip && file);
   setState("error");
 }
+$("stripRun").addEventListener("click", () => {
+  if (!file) return;
+  file.stripProtection = true;
+  run();
+});
 
 $("cancel").addEventListener("click", () => {
   stopTimer();
