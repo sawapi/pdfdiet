@@ -1,37 +1,38 @@
 // Runs pdfdiet off the main thread so the page stays responsive while a
 // large PDF is processed. One job at a time; the page terminates and
 // replaces the worker to cancel one.
-import init, { compress_pdf } from "./pdfdiet_wasm.js";
+import { init, compress } from "./pkg/dist/web.mjs";
 
-const ready = init({ module_or_path: new URL("./pdfdiet_wasm_bg.wasm", import.meta.url) });
+const ready = init();
 
 self.onmessage = async ({ data: job }) => {
   try {
     await ready;
     const t0 = performance.now();
-    const res = compress_pdf(
-      new Uint8Array(job.input),
-      job.dpi,
-      job.quality,
-      false, // strip_protection: never on the page
-      false, // break_signatures: never on the page
-      job.subsetOutlines,
-      job.stripJpegMetadata,
-    );
-    const output = res.output;
+    // Protection and signatures are never stripped on the page.
+    const res = compress(new Uint8Array(job.input), {
+      dpi: job.dpi,
+      quality: job.quality,
+      subsetOutlines: job.subsetOutlines,
+      stripJpegMetadata: job.stripJpegMetadata,
+    });
     const reply = {
       id: job.id,
       ok: true,
-      output: output.buffer,
-      log: res.log,
-      imagesTotal: res.images_total,
-      imagesRecompressed: res.images_recompressed,
+      output: res.output.buffer,
+      log: res.log.join("\n"),
+      imagesTotal: res.imagesTotal,
+      imagesRecompressed: res.imagesRecompressed,
       ms: performance.now() - t0,
     };
-    res.free();
-    self.postMessage(reply, [output.buffer]);
+    self.postMessage(reply, [res.output.buffer]);
   } catch (err) {
-    self.postMessage({ id: job.id, ok: false, error: String(err && err.message ? err.message : err) });
+    self.postMessage({
+      id: job.id,
+      ok: false,
+      reason: err?.reason, // set on PdfdietError: why the document was not processed
+      error: String(err && err.message ? err.message : err),
+    });
   }
 };
 

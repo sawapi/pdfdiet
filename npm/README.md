@@ -22,35 +22,77 @@ its original size. Run `inspect` first to see what a given file is made of.
 ## Node API
 
 ```js
-import { compress_pdf, inspect_pdf } from "@sawapi/pdfdiet";
+import { compress, inspect, PdfdietError } from "@sawapi/pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
 const input = readFileSync("in.pdf");
-const res = compress_pdf(input, 150, 80); // (bytes, dpi, quality)
-// Optional trailing flags: strip_protection, break_signatures,
-// subset_outlines, strip_jpeg_metadata
-// e.g. compress_pdf(input, 150, 80, false, false, true) also drops unused
-// glyph outlines (smaller; the fonts can no longer show text added later),
-// and compress_pdf(input, 150, 80, false, false, false, true) removes EXIF
-// (GPS, camera, dates), XMP and other metadata from embedded JPEGs.
+const res = compress(input); // defaults: { dpi: 150, quality: 80 }
 writeFileSync("out.pdf", res.output);
-console.log(res.log, res.images_recompressed, res.images_total);
+console.log(res.log.join("\n")); // what changed, and what was left alone and why
+console.log(`${res.imagesRecompressed} of ${res.imagesTotal} images recompressed`);
 ```
+
+Options (all optional):
+
+| option | default | |
+| --- | --- | --- |
+| `dpi` | 150 | target effective DPI; images drawn at a higher resolution are downsampled |
+| `quality` | 80 | JPEG quality for re-encoded images, 1-100 |
+| `subsetOutlines` | false | also drop embedded TrueType glyph outlines no text uses (smaller; the fonts can no longer show text added later) |
+| `stripJpegMetadata` | false | remove EXIF (GPS, camera, dates), XMP and other metadata from embedded JPEGs, losslessly |
+| `stripProtection` | false | process a document protected only by an owner password, removing its permission restrictions |
+| `breakSignatures` | false | process a digitally signed document, invalidating its signatures |
+
+`inspect(input)` lists the images, each with its pixel size, color space,
+filters, encoded size, the largest size it is drawn at (`drawnSize`, in
+inches) and the resulting effective resolution (`dpi: { x, y }`).
+
+A wrong argument type throws a `TypeError` and an out-of-range `dpi` or
+`quality` a `RangeError`. Documents that are not processed throw a
+`PdfdietError` whose `reason` is
+one of `"invalid-pdf"`, `"encrypted"`, `"protected"`, `"signed"` or
+`"empty"`:
+
+```js
+try {
+  compress(input);
+} catch (e) {
+  if (e instanceof PdfdietError && e.reason === "signed") {
+    // compress(input, { breakSignatures: true }) to go ahead anyway
+  }
+}
+```
+
+Type declarations are included (they need TypeScript 5.7 or later, for
+`Uint8Array<ArrayBuffer>`). The package is ESM; `require()` works
+too on Node 22.12 or later. TypeScript resolves the types under any
+`node16`-or-later or `bundler` module resolution; CommonJS (`.cts`) code
+that `require`s it needs `"module": "nodenext"` (TypeScript 5.8 or later).
 
 ## Browser API
 
-The browser build is WASM behind an explicit async init:
+The browser build loads its WASM asynchronously, once:
 
 ```js
-import init, { compress_pdf } from "@sawapi/pdfdiet/web";
+import { init, compress } from "@sawapi/pdfdiet/web";
 
-await init(); // fetches and instantiates the .wasm
-const res = compress_pdf(new Uint8Array(await file.arrayBuffer()), 150, 80);
+await init(); // fetches and instantiates the package's web/pdfdiet_wasm_bg.wasm
+const res = compress(new Uint8Array(await file.arrayBuffer()));
 const blob = new Blob([res.output], { type: "application/pdf" });
 ```
 
-Bundlers that understand the `exports` map will also resolve the bare
-`"@sawapi/pdfdiet"` import to the browser build outside Node.
+`init()` also takes a URL, a `Response` (or a promise of one, such as
+`fetch(url)`), the bytes or a compiled `WebAssembly.Module` if the `.wasm`
+file is served from elsewhere. `initSync(bytes)` loads it synchronously
+(best in a worker; it throws while an `init()` is still loading), and
+`init` is also the default export. The 0.1.x forms
+`init({ module_or_path })` and `initSync({ module })` still work.
+
+Bundlers that understand the `exports` map resolve the bare
+`"@sawapi/pdfdiet"` import to the browser build outside Node. The Node
+build exports the same `init`, `initSync` and default export as no-ops, so
+code written for the browser also runs under Node (server-side rendering,
+tests).
 
 ## Safety model
 

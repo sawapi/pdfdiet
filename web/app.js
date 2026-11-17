@@ -144,7 +144,7 @@ function finish(res) {
   stopTimer();
   running = null;
   if (!res.ok) {
-    showError(job.name, friendlyError(res.error));
+    showError(job.name, friendlyError(res.reason, res.error));
     return;
   }
   const before = job.size;
@@ -181,9 +181,10 @@ function finish(res) {
   setState("done");
 }
 
-function friendlyError(msg) {
-  if (/encrypt|password|protect/i.test(msg)) return "This PDF is password-protected or encrypted, so it was left alone.";
-  if (/signature|signed/i.test(msg)) return "This PDF is digitally signed; changing it would invalidate the signature, so it was left alone.";
+function friendlyError(reason, msg) {
+  if (reason === "encrypted" || reason === "protected") return "This PDF is password-protected or encrypted, so it was left alone.";
+  if (reason === "signed") return "This PDF is digitally signed; changing it would invalidate the signature, so it was left alone.";
+  if (reason === "empty") return "This PDF has no readable pages.";
   return msg ? "Couldn't process this PDF: " + msg : "Something went wrong.";
 }
 function showError(name, msg) {
