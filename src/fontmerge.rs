@@ -26,7 +26,9 @@ pub(crate) fn merge_font_subsets(doc: &mut Document, log: &mut Vec<String>) -> (
     // FontFile2 stream -> descriptors referencing it.
     let mut descs_of_file: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     for (&id, obj) in &doc.objects {
-        let Object::Dictionary(dict) = obj else { continue };
+        let Object::Dictionary(dict) = obj else {
+            continue;
+        };
         if !matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n == b"FontDescriptor") {
             continue;
         }
@@ -48,7 +50,9 @@ pub(crate) fn merge_font_subsets(doc: &mut Document, log: &mut Vec<String>) -> (
         let Ok(Object::Stream(stream)) = doc.get_object(fid) else {
             continue;
         };
-        let Ok(data) = inflate(stream, MAX_INFLATE) else { continue };
+        let Ok(data) = inflate(stream, MAX_INFLATE) else {
+            continue;
+        };
         held += data.len();
         if held > MAX_PASS_BYTES {
             break;
@@ -136,7 +140,9 @@ pub(crate) fn merge_font_subsets(doc: &mut Document, log: &mut Vec<String>) -> (
         renames.push((desc, b"FontName", new_tag.clone()));
     }
     for (&id, obj) in &doc.objects {
-        let Object::Dictionary(dict) = obj else { continue };
+        let Object::Dictionary(dict) = obj else {
+            continue;
+        };
         if !matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n == b"Font") {
             continue;
         }
@@ -369,8 +375,11 @@ mod tests {
         let mut head_table = vec![0u8; 54];
         head_table[8..12].copy_from_slice(&[checksum_seed; 4]); // checkSumAdjustment
 
-        let tables: [(&[u8; 4], &[u8]); 3] =
-            [(b"glyf", glyf), (b"head", &head_table), (b"name", &name_table)];
+        let tables: [(&[u8; 4], &[u8]); 3] = [
+            (b"glyf", glyf),
+            (b"head", &head_table),
+            (b"name", &name_table),
+        ];
         let mut out = Vec::new();
         out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
         out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
@@ -425,7 +434,10 @@ mod tests {
 
         let mut utf16: Vec<u8> = "SKOJEB+A".bytes().flat_map(|c| [0, c]).collect();
         neutralize_subset_tag(&mut utf16);
-        assert_eq!(utf16, "AAAAAA+A".bytes().flat_map(|c| [0, c]).collect::<Vec<u8>>());
+        assert_eq!(
+            utf16,
+            "AAAAAA+A".bytes().flat_map(|c| [0, c]).collect::<Vec<u8>>()
+        );
 
         let mut untagged = b"ArialMT".to_vec();
         neutralize_subset_tag(&mut untagged);

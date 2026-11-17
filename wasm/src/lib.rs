@@ -77,7 +77,6 @@ pub fn compress_pdf(
 /// Return the list of images in a PDF as a formatted table string.
 #[wasm_bindgen]
 pub fn inspect_pdf(input: &[u8]) -> Result<String, JsValue> {
-    let images =
-        pdfdiet::inspect_bytes(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let images = pdfdiet::inspect_bytes(input).map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(pdfdiet::format_inspect_table(&images))
 }

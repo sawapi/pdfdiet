@@ -433,7 +433,10 @@ mod tests {
         // row 2: V0 at the black edge, V0 at the imaginary width change.
         // 001 1011 011 | 1 1 | EOFB
         let bits = encode_g4(&[0xF0, 0xF0], 8, 2);
-        assert_eq!(bits, vec![0b00110110, 0b11110000, 0b00000001, 0b00000000, 0b00010000]);
+        assert_eq!(
+            bits,
+            vec![0b00110110, 0b11110000, 0b00000001, 0b00000000, 0b00010000]
+        );
     }
 
     #[test]

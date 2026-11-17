@@ -12,8 +12,8 @@
 //! (FONTFUZZ_ONLY=<seed file index>:<case>). Panics are caught and counted.
 use crate::{cffsubset, fontunion, merge_font_subsets, subset, type1};
 use lopdf::{Document, Object, ObjectId};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 struct Rng(u64);
@@ -67,7 +67,15 @@ fn prepare(path: &str) -> Option<(Document, Vec<ObjectId>)> {
 }
 
 const INTERESTING16: [u16; 8] = [0, 1, 2, 0x7FFF, 0x8000, 0xFFFF, 0x00FF, 0x0100];
-const INTERESTING32: [u32; 7] = [0, 1, 0x7FFF_FFFF, 0x8000_0000, 0xFFFF_FFFF, 0x0001_0000, 0x00FF_FFFF];
+const INTERESTING32: [u32; 7] = [
+    0,
+    1,
+    0x7FFF_FFFF,
+    0x8000_0000,
+    0xFFFF_FFFF,
+    0x0001_0000,
+    0x00FF_FFFF,
+];
 
 fn mutate(rng: &mut Rng, d: &mut Vec<u8>) {
     if d.is_empty() {
@@ -76,7 +84,11 @@ fn mutate(rng: &mut Rng, d: &mut Vec<u8>) {
     // Bias towards the front: sfnt table directories and CFF headers/INDEX
     // offsets live there.
     let pos = |rng: &mut Rng, len: usize| {
-        if rng.below(2) == 0 { rng.below(len.min(512)) } else { rng.below(len) }
+        if rng.below(2) == 0 {
+            rng.below(len.min(512))
+        } else {
+            rng.below(len)
+        }
     };
     for _ in 0..1 + rng.below(4) {
         let len = d.len();
@@ -150,9 +162,15 @@ fn run_passes(doc: &mut Document) {
 #[test]
 #[ignore]
 fn fontfuzz() {
-    let seeds: Vec<String> =
-        std::env::var("FONTFUZZ_SEEDS").unwrap_or_default().split_whitespace().map(String::from).collect();
-    let iters: usize = std::env::var("FONTFUZZ_ITERS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+    let seeds: Vec<String> = std::env::var("FONTFUZZ_SEEDS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let iters: usize = std::env::var("FONTFUZZ_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500);
     let only: Option<(usize, usize)> = std::env::var("FONTFUZZ_ONLY").ok().and_then(|v| {
         let (a, b) = v.split_once(':')?;
         Some((a.parse().ok()?, b.parse().ok()?))
@@ -166,17 +184,24 @@ fn fontfuzz() {
     let epoch = Instant::now();
     {
         let (current, started) = (current.clone(), started.clone());
-        std::thread::spawn(move || loop {
-            std::thread::sleep(Duration::from_millis(500));
-            let c = current.load(Ordering::SeqCst);
-            if c == u64::MAX {
-                continue;
-            }
-            let ran = epoch.elapsed().as_millis() as u64 - started.load(Ordering::SeqCst);
-            let rss = rss_kb();
-            if ran > max_secs * 1000 || rss > max_rss_kb {
-                eprintln!("WATCHDOG case {}:{} ran {ran} ms, rss {} MB", c >> 32, c & 0xFFFF_FFFF, rss / 1024);
-                std::process::abort();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let c = current.load(Ordering::SeqCst);
+                if c == u64::MAX {
+                    continue;
+                }
+                let ran = epoch.elapsed().as_millis() as u64 - started.load(Ordering::SeqCst);
+                let rss = rss_kb();
+                if ran > max_secs * 1000 || rss > max_rss_kb {
+                    eprintln!(
+                        "WATCHDOG case {}:{} ran {ran} ms, rss {} MB",
+                        c >> 32,
+                        c & 0xFFFF_FFFF,
+                        rss / 1024
+                    );
+                    std::process::abort();
+                }
             }
         });
     }
@@ -193,7 +218,8 @@ fn fontfuzz() {
             if only.is_some_and(|(a, b)| (a, b) != (si, i)) {
                 continue;
             }
-            let mut rng = Rng(((si as u64) << 40 ^ i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut rng =
+                Rng(((si as u64) << 40 ^ i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
             let mut doc = base.clone();
             for _ in 0..1 + rng.below(3) {
                 let id = fonts[rng.below(fonts.len())];
@@ -226,9 +252,19 @@ fn fontfuzz() {
                 panics.push((si, i, msg));
             }
         }
-        eprintln!("{path}: {} fonts, {iters} cases in {:.1}s", fonts.len(), t0.elapsed().as_secs_f64());
+        eprintln!(
+            "{path}: {} fonts, {iters} cases in {:.1}s",
+            fonts.len(),
+            t0.elapsed().as_secs_f64()
+        );
     }
-    eprintln!("slowest case {}:{} {} ms; peak rss now {} MB", slowest.1, slowest.2, slowest.0, rss_kb() / 1024);
+    eprintln!(
+        "slowest case {}:{} {} ms; peak rss now {} MB",
+        slowest.1,
+        slowest.2,
+        slowest.0,
+        rss_kb() / 1024
+    );
     let _ = std::panic::take_hook();
     assert!(panics.is_empty(), "{} panics", panics.len());
 }

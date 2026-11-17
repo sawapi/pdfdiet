@@ -5,8 +5,8 @@ use image::DynamicImage;
 use lopdf::{Dictionary, Document, Object};
 
 use crate::decode::{
-    MAX_PIXELS, decode_is_default, decode_parms_understood, expand_indices, indexed_palette, inflate_dct_wrapper,
-    is_cmyk_colorspace, jpeg_limits, jpeg_plausible, matte_bound,
+    MAX_PIXELS, decode_is_default, decode_parms_understood, expand_indices, indexed_palette,
+    inflate_dct_wrapper, is_cmyk_colorspace, jpeg_limits, jpeg_plausible, matte_bound,
 };
 use crate::images::{ImageInfo, target_size};
 use crate::limits::inflate;
@@ -27,7 +27,11 @@ enum CmykSource {
 }
 
 pub(crate) enum CmykOutcome {
-    Recompressed { to: usize, resized: Option<(u32, u32)>, flate: bool },
+    Recompressed {
+        to: usize,
+        resized: Option<(u32, u32)>,
+        flate: bool,
+    },
     /// Re-encoding did not beat the stored bytes; nothing was changed.
     Larger { to: usize },
     /// Not a CMYK JPEG this path can handle; nothing was changed.
@@ -62,7 +66,11 @@ fn ycck_if_adobe(adobe: Option<smallpeg::AdobeTransform>) -> Option<smallpeg::Ad
 ///
 /// Anything that would change how the samples are interpreted at the PDF
 /// level (a /Decode array, /DecodeParms, a color-key mask) is left alone.
-pub(crate) fn recompress_cmyk_jpeg(doc: &mut Document, info: &ImageInfo, opts: &CompressOptions) -> CmykOutcome {
+pub(crate) fn recompress_cmyk_jpeg(
+    doc: &mut Document,
+    info: &ImageInfo,
+    opts: &CompressOptions,
+) -> CmykOutcome {
     let filters: Vec<&str> = info.filters.iter().map(|s| s.as_str()).collect();
     let data = {
         let Ok(Object::Stream(stream)) = doc.get_object(info.id) else {
@@ -79,7 +87,10 @@ pub(crate) fn recompress_cmyk_jpeg(doc: &mut Document, info: &ImageInfo, opts: &
             || !decode_is_default(doc, dict)
             || !decode_parms_understood(doc, dict)
             || matches!(dict.get(b"ImageMask"), Ok(Object::Boolean(true)))
-            || matches!(dict.get(b"Mask").and_then(|o| resolve(doc, o)), Ok(Object::Array(_)))
+            || matches!(
+                dict.get(b"Mask").and_then(|o| resolve(doc, o)),
+                Ok(Object::Array(_))
+            )
             || !(bpc == Some(8) || (indexed.is_some() && matches!(bpc, Some(1 | 2 | 4))))
             || matte_bound(doc, dict)
         {
@@ -108,24 +119,29 @@ pub(crate) fn recompress_cmyk_jpeg(doc: &mut Document, info: &ImageInfo, opts: &
                 Err(_) => return CmykOutcome::NotApplicable,
             }
         } else {
-            (match filters.as_slice() {
-            ["DCTDecode"] => CmykSource::Jpeg(stream.content.clone()),
-            ["FlateDecode", "DCTDecode"] => match inflate_dct_wrapper(stream) {
-                Ok(d) => CmykSource::Jpeg(d),
-                Err(_) => return CmykOutcome::NotApplicable,
-            },
-            [] => CmykSource::Raw(stream.content.clone()),
-            ["FlateDecode"] => match inflate(stream, w * h * 4 + h) {
-                Ok(d) => CmykSource::Raw(d),
-                Err(_) => return CmykOutcome::NotApplicable,
-            },
-            _ => return CmykOutcome::NotApplicable,
-        }, None)
+            (
+                match filters.as_slice() {
+                    ["DCTDecode"] => CmykSource::Jpeg(stream.content.clone()),
+                    ["FlateDecode", "DCTDecode"] => match inflate_dct_wrapper(stream) {
+                        Ok(d) => CmykSource::Jpeg(d),
+                        Err(_) => return CmykOutcome::NotApplicable,
+                    },
+                    [] => CmykSource::Raw(stream.content.clone()),
+                    ["FlateDecode"] => match inflate(stream, w * h * 4 + h) {
+                        Ok(d) => CmykSource::Raw(d),
+                        Err(_) => return CmykOutcome::NotApplicable,
+                    },
+                    _ => return CmykOutcome::NotApplicable,
+                },
+                None,
+            )
         }
     };
     let (data, indexed_base) = data;
     let src = match data {
-        CmykSource::Jpeg(jpeg) if !jpeg_plausible(&jpeg, Some((info.width as u32, info.height as u32))) => {
+        CmykSource::Jpeg(jpeg)
+            if !jpeg_plausible(&jpeg, Some((info.width as u32, info.height as u32))) =>
+        {
             return CmykOutcome::NotApplicable;
         }
         CmykSource::Jpeg(jpeg) => match smallpeg::decode_cmyk_with(&jpeg, &jpeg_limits()) {
@@ -183,7 +199,11 @@ pub(crate) fn recompress_cmyk_jpeg(doc: &mut Document, info: &ImageInfo, opts: &
     if indexed_base.is_some() && resized {
         let mut flate = lopdf::Stream::new(Dictionary::new(), pixels);
         if flate.compress().is_ok() && flate.content.len() < jpeg.len() {
-            filter = flate.dict.get(b"Filter").is_ok().then_some(b"FlateDecode".as_slice());
+            filter = flate
+                .dict
+                .get(b"Filter")
+                .is_ok()
+                .then_some(b"FlateDecode".as_slice());
             jpeg = flate.content;
         }
     }
@@ -227,7 +247,10 @@ pub(crate) fn recompress_cmyk_jpeg(doc: &mut Document, info: &ImageInfo, opts: &
 /// and every PDF-level property (ColorSpace, Decode, SMask) stay valid.
 /// Enforces the baseline-only policy for PDF embedding: a progressive result
 /// is only accepted when the input was already progressive.
-pub(crate) fn try_lossless_jpeg_optimize(doc: &mut Document, info: &ImageInfo) -> Option<(usize, usize)> {
+pub(crate) fn try_lossless_jpeg_optimize(
+    doc: &mut Document,
+    info: &ImageInfo,
+) -> Option<(usize, usize)> {
     let filters: Vec<&str> = info.filters.iter().map(|s| s.as_str()).collect();
     let (data, stored_len, unwrapped_flate) = {
         let Ok(Object::Stream(stream)) = doc.get_object(info.id) else {
@@ -249,7 +272,11 @@ pub(crate) fn try_lossless_jpeg_optimize(doc: &mut Document, info: &ImageInfo) -
                 if stream.dict.get(b"DecodeParms").is_ok() {
                     return None;
                 }
-                (inflate_dct_wrapper(stream).ok()?, stream.content.len(), true)
+                (
+                    inflate_dct_wrapper(stream).ok()?,
+                    stream.content.len(),
+                    true,
+                )
             }
             _ => return None,
         }
@@ -274,7 +301,9 @@ pub(crate) fn try_lossless_jpeg_optimize(doc: &mut Document, info: &ImageInfo) -
         return None;
     };
     if unwrapped_flate {
-        stream.dict.set("Filter", Object::Name(b"DCTDecode".to_vec()));
+        stream
+            .dict
+            .set("Filter", Object::Name(b"DCTDecode".to_vec()));
     }
     stream.dict.set("Length", optimized.len() as i64);
     let new_len = optimized.len();
@@ -290,7 +319,9 @@ pub(crate) fn try_lossless_jpeg_optimize(doc: &mut Document, info: &ImageInfo) -
 pub(crate) fn strip_jpeg_metadata(doc: &mut Document) -> (usize, i64) {
     let (mut count, mut saved) = (0, 0i64);
     for obj in doc.objects.values_mut() {
-        let Object::Stream(stream) = obj else { continue };
+        let Object::Stream(stream) = obj else {
+            continue;
+        };
         if !matches!(stream.dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"Image")
             || stream.dict.get(b"DecodeParms").is_ok()
         {
@@ -298,21 +329,33 @@ pub(crate) fn strip_jpeg_metadata(doc: &mut Document) -> (usize, i64) {
         }
         let filters: Vec<Vec<u8>> = match stream.dict.get(b"Filter") {
             Ok(Object::Name(n)) => vec![n.clone()],
-            Ok(Object::Array(a)) => a.iter().filter_map(|o| o.as_name().ok().map(<[u8]>::to_vec)).collect(),
+            Ok(Object::Array(a)) => a
+                .iter()
+                .filter_map(|o| o.as_name().ok().map(<[u8]>::to_vec))
+                .collect(),
             _ => continue,
         };
-        let wrapped = match filters.iter().map(Vec::as_slice).collect::<Vec<_>>().as_slice() {
+        let wrapped = match filters
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
             [b"DCTDecode"] => false,
             [b"FlateDecode", b"DCTDecode"] => true,
             _ => continue,
         };
         let jpeg = if wrapped {
-            let Ok(d) = inflate_dct_wrapper(stream) else { continue };
+            let Ok(d) = inflate_dct_wrapper(stream) else {
+                continue;
+            };
             d
         } else {
             stream.content.clone()
         };
-        let Some(clean) = smallpeg::strip_metadata(&jpeg) else { continue };
+        let Some(clean) = smallpeg::strip_metadata(&jpeg) else {
+            continue;
+        };
         if clean.len() >= jpeg.len() {
             continue; // no metadata
         }
@@ -320,12 +363,18 @@ pub(crate) fn strip_jpeg_metadata(doc: &mut Document) -> (usize, i64) {
         // deflate well); otherwise the bare JPEG is stored.
         let rewrapped = if wrapped {
             let mut s = lopdf::Stream::new(Dictionary::new(), clean.clone());
-            s.compress().ok().map(|_| s.content).filter(|c| c.len() < clean.len())
+            s.compress()
+                .ok()
+                .map(|_| s.content)
+                .filter(|c| c.len() < clean.len())
         } else {
             None
         };
         let (content, filter) = match rewrapped {
-            Some(c) => (c, Object::Array(vec!["FlateDecode".into(), "DCTDecode".into()])),
+            Some(c) => (
+                c,
+                Object::Array(vec!["FlateDecode".into(), "DCTDecode".into()]),
+            ),
             None => (clean, Object::Name(b"DCTDecode".to_vec())),
         };
         if content.len() >= stream.content.len() {
@@ -414,7 +463,8 @@ pub(crate) fn encode_jpeg(img: &DynamicImage, quality: u8, sharp_chroma: bool) -
                     converted.as_raw()
                 }
             };
-            enc.sampling(sampling).encode_rgb(raw, img.width(), img.height())
+            enc.sampling(sampling)
+                .encode_rgb(raw, img.width(), img.height())
         }
     };
     huffman_symbols_baseline(&jpeg).then_some(jpeg)
@@ -452,7 +502,9 @@ fn huffman_symbols_baseline(jpeg: &[u8]) -> bool {
                 }
                 let ac = t[0] >> 4 == 1;
                 let n: usize = t[1..17].iter().map(|&c| c as usize).sum();
-                let Some(symbols) = t.get(17..17 + n) else { return false };
+                let Some(symbols) = t.get(17..17 + n) else {
+                    return false;
+                };
                 let ok = symbols.iter().all(|&s| {
                     if ac {
                         matches!(s, 0x00 | 0xF0) || (1..=10).contains(&(s & 0x0F))
@@ -480,7 +532,9 @@ mod tests {
     #[test]
     fn non_baseline_huffman_symbols_are_rejected() {
         // A sharp black/white pattern at quality 100 (quant value 1).
-        let px: Vec<u8> = (0..64 * 64).map(|i| if (i / 4 + i / 256) % 2 == 0 { 0 } else { 255 }).collect();
+        let px: Vec<u8> = (0..64 * 64)
+            .map(|i| if (i / 4 + i / 256) % 2 == 0 { 0 } else { 255 })
+            .collect();
         let raw = smallpeg::Encoder::new(80)
             .progressive(false)
             .quant_preset(smallpeg::QuantPreset::AnnexK)
@@ -510,15 +564,28 @@ mod tests {
         tagged.extend(&payload);
         tagged.extend(&clean[2..]);
         let (mut doc, plain) = doc_with_image(|d| d.set("Filter", "DCTDecode"), &tagged);
-        let mut wd = doc.get_object(plain).unwrap().as_stream().unwrap().dict.clone();
+        let mut wd = doc
+            .get_object(plain)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .dict
+            .clone();
         wd.remove(b"Filter");
         let mut ws = lopdf::Stream::new(wd.clone(), tagged.clone());
         ws.compress().unwrap();
         assert!(ws.content.len() < tagged.len(), "deflated");
-        ws.dict.set("Filter", Object::Array(vec!["FlateDecode".into(), "DCTDecode".into()]));
+        ws.dict.set(
+            "Filter",
+            Object::Array(vec!["FlateDecode".into(), "DCTDecode".into()]),
+        );
         let wrapped = doc.add_object(ws);
         let untouched = doc.add_object(lopdf::Stream::new(
-            { let mut d = wd.clone(); d.set("Filter", "DCTDecode"); d },
+            {
+                let mut d = wd.clone();
+                d.set("Filter", "DCTDecode");
+                d
+            },
             clean.clone(),
         ));
 

@@ -254,10 +254,14 @@ mod tests {
     fn identity_bearing_dicts_are_not_merged() {
         for type_name in [b"OCG".as_slice(), b"Page", b"Annot", b"StructElem"] {
             let mut doc = Document::new();
-            doc.objects
-                .insert((1, 0), typed_dict(type_name, "Name", Object::string_literal("x")));
-            doc.objects
-                .insert((2, 0), typed_dict(type_name, "Name", Object::string_literal("x")));
+            doc.objects.insert(
+                (1, 0),
+                typed_dict(type_name, "Name", Object::string_literal("x")),
+            );
+            doc.objects.insert(
+                (2, 0),
+                typed_dict(type_name, "Name", Object::string_literal("x")),
+            );
             let mut owner = Dictionary::new();
             owner.set(
                 "Kids",
@@ -266,7 +270,12 @@ mod tests {
             doc.objects.insert((3, 0), Object::Dictionary(owner));
 
             let (merged, _) = dedup_streams(&mut doc);
-            assert_eq!(merged, 0, "{} must not be merged", String::from_utf8_lossy(type_name));
+            assert_eq!(
+                merged,
+                0,
+                "{} must not be merged",
+                String::from_utf8_lossy(type_name)
+            );
             assert!(doc.objects.contains_key(&(2, 0)));
         }
     }
@@ -276,10 +285,14 @@ mod tests {
     #[test]
     fn dicts_differing_only_in_a_non_utf8_byte_survive() {
         let mut doc = Document::new();
-        doc.objects
-            .insert((1, 0), typed_dict(b"ExtGState", "BM", Object::Name(vec![0x80])));
-        doc.objects
-            .insert((2, 0), typed_dict(b"ExtGState", "BM", Object::Name(vec![0x81])));
+        doc.objects.insert(
+            (1, 0),
+            typed_dict(b"ExtGState", "BM", Object::Name(vec![0x80])),
+        );
+        doc.objects.insert(
+            (2, 0),
+            typed_dict(b"ExtGState", "BM", Object::Name(vec![0x81])),
+        );
         let (merged, _) = dedup_streams(&mut doc);
         assert_eq!(merged, 0);
         assert!(doc.objects.contains_key(&(2, 0)));
@@ -300,8 +313,10 @@ mod tests {
         doc.objects.insert((2, 0), group());
         let mut form = Dictionary::new();
         form.set("Group", Object::Reference((2, 0)));
-        doc.objects
-            .insert((3, 0), Object::Stream(lopdf::Stream::new(form, b"x".to_vec())));
+        doc.objects.insert(
+            (3, 0),
+            Object::Stream(lopdf::Stream::new(form, b"x".to_vec())),
+        );
 
         let (merged, _) = dedup_streams(&mut doc);
         assert_eq!(merged, 1);
@@ -320,8 +335,10 @@ mod tests {
         for id in [(1, 0), (2, 0)] {
             let mut dict = Dictionary::new();
             dict.set("Type", Object::Name(b"ObjStm".to_vec()));
-            doc.objects
-                .insert(id, Object::Stream(lopdf::Stream::new(dict, b"payload".to_vec())));
+            doc.objects.insert(
+                id,
+                Object::Stream(lopdf::Stream::new(dict, b"payload".to_vec())),
+            );
         }
         let (merged, _) = dedup_streams(&mut doc);
         assert_eq!(merged, 0);

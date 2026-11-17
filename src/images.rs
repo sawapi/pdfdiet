@@ -110,7 +110,9 @@ pub fn collect_images(doc: &Document) -> Vec<ImageInfo> {
 
     let mut images = Vec::new();
     for (&id, obj) in &doc.objects {
-        let Object::Stream(stream) = obj else { continue };
+        let Object::Stream(stream) = obj else {
+            continue;
+        };
         let dict = &stream.dict;
         if !matches!(dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"Image") {
             continue;
@@ -251,7 +253,15 @@ fn walk_ops(
                         let Some((c, opened)) = walk.parse_stream(stream) else {
                             return false;
                         };
-                        if !walk_ops(doc, &c.operations, &inner_res, inner_ctm, usage, depth + 1, walk) {
+                        if !walk_ops(
+                            doc,
+                            &c.operations,
+                            &inner_res,
+                            inner_ctm,
+                            usage,
+                            depth + 1,
+                            walk,
+                        ) {
                             return false;
                         }
                         walk.close(opened);
@@ -294,7 +304,9 @@ fn fallback_page_usage(
 fn propagate_smask_usage(doc: &Document, usage: &mut HashMap<ObjectId, Extent>) {
     let mut links: Vec<(ObjectId, ObjectId)> = Vec::new();
     for (&id, obj) in &doc.objects {
-        let Object::Stream(stream) = obj else { continue };
+        let Object::Stream(stream) = obj else {
+            continue;
+        };
         if !matches!(stream.dict.get(b"Subtype"), Ok(Object::Name(n)) if n == b"Image") {
             continue;
         }

@@ -31,7 +31,8 @@ pub(crate) fn matte_bound(doc: &Document, dict: &Dictionary) -> bool {
 /// Is the image's color space four-component CMYK (DeviceCMYK, or an ICC
 /// profile with N = 4)?
 pub(crate) fn is_cmyk_colorspace(doc: &Document, dict: &Dictionary) -> bool {
-    dict.get(b"ColorSpace").is_ok_and(|cs| is_cmyk_object(doc, cs))
+    dict.get(b"ColorSpace")
+        .is_ok_and(|cs| is_cmyk_object(doc, cs))
 }
 
 /// is_cmyk_colorspace for a color space object (name, array or reference).
@@ -58,11 +59,16 @@ fn is_cmyk_object(doc: &Document, cs: &Object) -> bool {
 /// matched to the layers.
 pub(crate) fn inflate_dct_wrapper(stream: &lopdf::Stream) -> lopdf::Result<Vec<u8>> {
     if stream.dict.get(b"DecodeParms").is_ok() {
-        return Err(lopdf::Error::Unimplemented("DecodeParms on a Flate-wrapped JPEG"));
+        return Err(lopdf::Error::Unimplemented(
+            "DecodeParms on a Flate-wrapped JPEG",
+        ));
     }
     let mut dict = Dictionary::new();
     dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
-    inflate(&lopdf::Stream::new(dict, stream.content.clone()), MAX_INFLATE)
+    inflate(
+        &lopdf::Stream::new(dict, stream.content.clone()),
+        MAX_INFLATE,
+    )
 }
 
 /// Is a JPEG safe to hand to a decoder or optimizer? Its frame header must
@@ -72,7 +78,9 @@ pub(crate) fn inflate_dct_wrapper(stream: &lopdf::Stream) -> lopdf::Result<Vec<u
 /// frame would otherwise cost a gigabyte. Real JPEGs, even of blank pages,
 /// stay well above one byte per thousand pixels.
 pub(crate) fn jpeg_plausible(jpeg: &[u8], expected: Option<(u32, u32)>) -> bool {
-    let Some(info) = smallpeg::jpeg_info(jpeg) else { return false };
+    let Some(info) = smallpeg::jpeg_info(jpeg) else {
+        return false;
+    };
     let (w, h) = (info.width, info.height);
     let pixels = w as u64 * h as u64;
     pixels <= MAX_PIXELS
@@ -125,7 +133,10 @@ pub(crate) fn decode_samples(doc: &Document, id: ObjectId) -> Result<DynamicImag
     // A color-key /Mask array makes specific sample values transparent; the
     // lossy pipeline would shift values across the key range and break the
     // mask (a stencil /Mask *stream* is unaffected by recompressing the base).
-    if matches!(dict.get(b"Mask").and_then(|o| resolve(doc, o)), Ok(Object::Array(_))) {
+    if matches!(
+        dict.get(b"Mask").and_then(|o| resolve(doc, o)),
+        Ok(Object::Array(_))
+    ) {
         return Err("has a color-key mask");
     }
     // Resource cap: refuse to expand pathological dimensions (a kilobyte of
@@ -143,8 +154,7 @@ pub(crate) fn decode_samples(doc: &Document, id: ObjectId) -> Result<DynamicImag
             // converted to RGB here: Adobe-style CMYK is stored inverted by
             // convention, which a generic decoder does not apply, so the
             // "conversion" silently turns white into black.
-            let components =
-                colorspace_components(doc, dict).ok_or("unsupported color space")?;
+            let components = colorspace_components(doc, dict).ok_or("unsupported color space")?;
             let data = if filters.len() == 2 {
                 inflate_dct_wrapper(stream).map_err(|_| "undecodable or oversized Flate wrapper")?
             } else {
@@ -163,7 +173,9 @@ pub(crate) fn decode_samples(doc: &Document, id: ObjectId) -> Result<DynamicImag
             limits.max_image_height = Some(65_535);
             limits.max_alloc = Some(512 << 20);
             reader.limits(limits);
-            let img = reader.decode().map_err(|_| "undecodable or oversized JPEG")?;
+            let img = reader
+                .decode()
+                .map_err(|_| "undecodable or oversized JPEG")?;
             // The JPEG's own component layout must agree with the PDF color
             // space; anything else (CMYK data under an RGB ICC profile, 16-bit,
             // alpha) would need a conversion we cannot do faithfully.
@@ -198,8 +210,7 @@ pub(crate) fn decode_samples(doc: &Document, id: ObjectId) -> Result<DynamicImag
                 return Err("unsupported bit depth");
             }
             let (w, h) = (w as u32, h as u32);
-            let components =
-                colorspace_components(doc, dict).ok_or("unsupported color space")?;
+            let components = colorspace_components(doc, dict).ok_or("unsupported color space")?;
             // Inflate no further than the sample data the image needs (plus
             // one PNG-predictor filter byte per row, which lopdf strips).
             let expected = w as usize * h as usize * components as usize + h as usize;
@@ -256,8 +267,9 @@ pub(crate) fn indexed_palette(
         Ok(Object::String(bytes, _)) => bytes.clone(),
         // At most 256 entries of 4 bytes are used; a longer table is legal,
         // but nothing past this bound is ever needed.
-        Ok(Object::Stream(s)) => inflate(s, 1 << 20)
-            .map_err(|_| "undecodable or oversized Indexed lookup table")?,
+        Ok(Object::Stream(s)) => {
+            inflate(s, 1 << 20).map_err(|_| "undecodable or oversized Indexed lookup table")?
+        }
         _ => return Err("malformed Indexed color space"),
     };
     let need = (hival + 1) * components as usize;
@@ -326,8 +338,12 @@ pub(crate) fn expand_indices(
 /// Is /Decode absent, or exactly the default mapping (and so a no-op)?
 /// The default is [0 1] per component, or [0 2^bpc-1] for Indexed.
 pub(crate) fn decode_is_default(doc: &Document, dict: &Dictionary) -> bool {
-    let Ok(obj) = dict.get(b"Decode") else { return true };
-    let Ok(Object::Array(a)) = resolve(doc, obj) else { return false };
+    let Ok(obj) = dict.get(b"Decode") else {
+        return true;
+    };
+    let Ok(Object::Array(a)) = resolve(doc, obj) else {
+        return false;
+    };
     let Some(values) = a
         .iter()
         .map(|o| match o {
@@ -345,7 +361,9 @@ pub(crate) fn decode_is_default(doc: &Document, dict: &Dictionary) -> bool {
             _ => return false,
         },
         Ok(None) => {
-            let Some(cs) = dict.get(b"ColorSpace").ok() else { return false };
+            let Some(cs) = dict.get(b"ColorSpace").ok() else {
+                return false;
+            };
             let Some(n) =
                 cs_object_components(doc, cs).or_else(|| is_cmyk_object(doc, cs).then_some(4))
             else {
@@ -374,7 +392,9 @@ pub(crate) fn decode_is_default(doc: &Document, dict: &Dictionary) -> bool {
 /// (/ColorTransform) always count as not understood. Writers that replace
 /// the samples must remove /DecodeParms.
 pub(crate) fn decode_parms_understood(doc: &Document, dict: &Dictionary) -> bool {
-    let Ok(obj) = dict.get(b"DecodeParms") else { return true };
+    let Ok(obj) = dict.get(b"DecodeParms") else {
+        return true;
+    };
     if filter_names(dict).iter().any(|f| f != "FlateDecode") {
         return false;
     }
@@ -396,7 +416,8 @@ pub(crate) fn decode_parms_understood(doc: &Document, dict: &Dictionary) -> bool
                         && dict_int(dict, b"BitsPerComponent") == Some(8)
                         && components.is_some()
                         && dict_int(d, b"Colors").unwrap_or(1) == components.unwrap_or(0) as i64
-                        && dict_int(d, b"Columns").unwrap_or(1) == dict_int(dict, b"Width").unwrap_or(-1)
+                        && dict_int(d, b"Columns").unwrap_or(1)
+                            == dict_int(dict, b"Width").unwrap_or(-1)
                 }
                 _ => false,
             },
@@ -432,13 +453,14 @@ fn cs_object_components(doc: &Document, cs: &Object) -> Option<u8> {
         Object::Array(a) => {
             if matches!(a.first(), Some(Object::Name(n)) if n == b"ICCBased")
                 && let Some(Object::Reference(rid)) = a.get(1)
-                    && let Ok(Object::Stream(s)) = doc.get_object(*rid) {
-                        return dict_int(&s.dict, b"N").and_then(|n| match n {
-                            3 => Some(3),
-                            1 => Some(1),
-                            _ => None,
-                        });
-                    }
+                && let Ok(Object::Stream(s)) = doc.get_object(*rid)
+            {
+                return dict_int(&s.dict, b"N").and_then(|n| match n {
+                    3 => Some(3),
+                    1 => Some(1),
+                    _ => None,
+                });
+            }
             None
         }
         _ => None,
@@ -453,10 +475,11 @@ pub(crate) fn colorspace_name(doc: &Document, dict: &Dictionary) -> String {
                 let base = String::from_utf8_lossy(n).into_owned();
                 if n == b"ICCBased"
                     && let Some(Object::Reference(rid)) = a.get(1)
-                        && let Ok(Object::Stream(s)) = doc.get_object(*rid)
-                            && let Some(comps) = dict_int(&s.dict, b"N") {
-                                return format!("{base}(N={comps})");
-                            }
+                    && let Ok(Object::Stream(s)) = doc.get_object(*rid)
+                    && let Some(comps) = dict_int(&s.dict, b"N")
+                {
+                    return format!("{base}(N={comps})");
+                }
                 base
             }
             _ => "array".into(),
@@ -470,7 +493,10 @@ pub(crate) mod tests {
     use super::*;
 
     /// Build a one-image document in memory (no PDF parsing needed).
-    pub(crate) fn doc_with_image(build: impl FnOnce(&mut Dictionary), data: &[u8]) -> (Document, ObjectId) {
+    pub(crate) fn doc_with_image(
+        build: impl FnOnce(&mut Dictionary),
+        data: &[u8],
+    ) -> (Document, ObjectId) {
         let mut doc = Document::with_version("1.5");
         let mut dict = Dictionary::new();
         dict.set("Type", Object::Name(b"XObject".to_vec()));
@@ -550,7 +576,10 @@ pub(crate) mod tests {
                     if let Some(p) = predictor {
                         parms.set("Predictor", p);
                     }
-                    d.set("DecodeParms", Object::Array(vec![Object::Dictionary(parms)]));
+                    d.set(
+                        "DecodeParms",
+                        Object::Array(vec![Object::Dictionary(parms)]),
+                    );
                 },
                 &[0u8; 48],
             );
@@ -573,7 +602,10 @@ pub(crate) mod tests {
         }
         let mut enc = lopdf::Stream::new(Dictionary::new(), rows);
         enc.compress().unwrap();
-        assert!(enc.dict.get(b"Filter").is_ok(), "test data must actually be Flate");
+        assert!(
+            enc.dict.get(b"Filter").is_ok(),
+            "test data must actually be Flate"
+        );
         let parms = |colors: i64, columns: i64| {
             let mut p = Dictionary::new();
             p.set("Predictor", 12i64);
@@ -594,7 +626,9 @@ pub(crate) mod tests {
             )
         };
         let (doc, id) = make(parms(3, w as i64));
-        let DynamicImage::ImageRgb8(img) = decode_image(&doc, id).unwrap() else { panic!() };
+        let DynamicImage::ImageRgb8(img) = decode_image(&doc, id).unwrap() else {
+            panic!()
+        };
         for x in 0..w as u32 {
             let i = x as u8;
             assert_eq!(img.get_pixel(x, 3).0, [10 + i, 20 + i, 30 + i]);
@@ -636,16 +670,35 @@ pub(crate) mod tests {
         let rgb = |decode: Vec<Object>| {
             doc_with_image(|d| d.set("Decode", Object::Array(decode)), &[0u8; 48])
         };
-        let (doc, id) = rgb(vec![0.into(), 1.into(), 0.into(), 1.into(), 0.into(), 1.into()]);
+        let (doc, id) = rgb(vec![
+            0.into(),
+            1.into(),
+            0.into(),
+            1.into(),
+            0.into(),
+            1.into(),
+        ]);
         assert!(decode_image(&doc, id).is_ok());
-        let (doc, id) = rgb(vec![1.into(), 0.into(), 1.into(), 0.into(), 1.into(), 0.into()]);
+        let (doc, id) = rgb(vec![
+            1.into(),
+            0.into(),
+            1.into(),
+            0.into(),
+            1.into(),
+            0.into(),
+        ]);
         assert_eq!(decode_image(&doc, id), Err("has a Decode array"));
     }
 
     #[test]
     fn one_element_colorspace_arrays_are_understood() {
         let (doc, id) = doc_with_image(
-            |d| d.set("ColorSpace", Object::Array(vec![Object::Name(b"DeviceRGB".to_vec())])),
+            |d| {
+                d.set(
+                    "ColorSpace",
+                    Object::Array(vec![Object::Name(b"DeviceRGB".to_vec())]),
+                )
+            },
             &[0u8; 48],
         );
         assert!(decode_image(&doc, id).is_ok());
@@ -672,7 +725,9 @@ pub(crate) mod tests {
             // 4 px per row = 2 bytes per row, 4 rows.
             &[0x01, 0x23, 0x01, 0x23, 0x01, 0x23, 0x01, 0x29],
         );
-        let DynamicImage::ImageRgb8(img) = decode_image(&doc, id).unwrap() else { panic!() };
+        let DynamicImage::ImageRgb8(img) = decode_image(&doc, id).unwrap() else {
+            panic!()
+        };
         assert_eq!(img.get_pixel(0, 0).0, [0, 0, 0]);
         assert_eq!(img.get_pixel(1, 0).0, [255, 0, 0]);
         assert_eq!(img.get_pixel(3, 0).0, [0, 0, 255]);
@@ -680,12 +735,15 @@ pub(crate) mod tests {
         // A wrong length is refused, not guessed at.
         let (doc, id) = doc_with_image(
             |d| {
-                d.set("ColorSpace", Object::Array(vec![
-                    Object::Name(b"Indexed".to_vec()),
-                    Object::Name(b"DeviceRGB".to_vec()),
-                    0.into(),
-                    Object::String(vec![1, 2, 3], lopdf::StringFormat::Literal),
-                ]));
+                d.set(
+                    "ColorSpace",
+                    Object::Array(vec![
+                        Object::Name(b"Indexed".to_vec()),
+                        Object::Name(b"DeviceRGB".to_vec()),
+                        0.into(),
+                        Object::String(vec![1, 2, 3], lopdf::StringFormat::Literal),
+                    ]),
+                );
                 d.set("BitsPerComponent", 8i64);
             },
             &[0u8; 15],
@@ -696,7 +754,19 @@ pub(crate) mod tests {
     #[test]
     fn decode_image_rejects_color_key_mask() {
         let (doc, id) = doc_with_image(
-            |d| d.set("Mask", Object::Array(vec![0.into(), 10.into(), 0.into(), 10.into(), 0.into(), 10.into()])),
+            |d| {
+                d.set(
+                    "Mask",
+                    Object::Array(vec![
+                        0.into(),
+                        10.into(),
+                        0.into(),
+                        10.into(),
+                        0.into(),
+                        10.into(),
+                    ]),
+                )
+            },
             &[0u8; 48],
         );
         assert_eq!(decode_image(&doc, id), Err("has a color-key mask"));

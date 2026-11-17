@@ -45,7 +45,11 @@ fn parse_cost(data: &[u8]) -> usize {
     let mut depth = 0usize;
     let mut in_run = false;
     let operand = |depth: usize, in_array: &mut usize, other: &mut usize| {
-        if depth > 0 { *in_array += 1 } else { *other += 1 }
+        if depth > 0 {
+            *in_array += 1
+        } else {
+            *other += 1
+        }
     };
     for &b in data {
         match b {
@@ -57,7 +61,11 @@ fn parse_cost(data: &[u8]) -> usize {
             // Arrays and dictionaries (and, overestimating, hex strings).
             b'[' | b']' | b'<' | b'>' => {
                 operand(depth, &mut in_array, &mut other);
-                depth = if matches!(b, b'[' | b'<') { depth + 1 } else { depth.saturating_sub(1) };
+                depth = if matches!(b, b'[' | b'<') {
+                    depth + 1
+                } else {
+                    depth.saturating_sub(1)
+                };
                 in_run = false;
             }
             b'(' | b')' | b'{' | b'}' | b'%' => {
@@ -92,7 +100,11 @@ pub(crate) struct Opened(usize);
 
 impl Walk {
     pub(crate) fn new(forms: u32) -> Self {
-        Walk { forms, live: 0, parsed: 0 }
+        Walk {
+            forms,
+            live: 0,
+            parsed: 0,
+        }
     }
 
     /// Start a new page: nothing is open.
@@ -104,8 +116,14 @@ impl Walk {
     /// as open until `close` (callers that abandon the walk need not).
     pub(crate) fn parse(&mut self, data: &[u8]) -> Option<(Content, Opened)> {
         let cost = parse_cost(data);
-        let live = self.live.checked_add(cost).filter(|&v| v <= MAX_LIVE_COST)?;
-        let parsed = self.parsed.checked_add(cost).filter(|&v| v <= MAX_WALK_COST)?;
+        let live = self
+            .live
+            .checked_add(cost)
+            .filter(|&v| v <= MAX_LIVE_COST)?;
+        let parsed = self
+            .parsed
+            .checked_add(cost)
+            .filter(|&v| v <= MAX_WALK_COST)?;
         let content = Content::decode_strict(data).ok()?;
         (self.live, self.parsed) = (live, parsed);
         Some((content, Opened(cost)))
@@ -138,13 +156,17 @@ pub(crate) fn inflate(stream: &lopdf::Stream, limit: usize) -> lopdf::Result<Vec
 pub(crate) fn page_content_bounded(doc: &Document, page_id: ObjectId) -> Option<Vec<u8>> {
     let page = doc.get_dictionary(page_id).ok()?;
     let mut data = Vec::new();
-    let Ok(contents) = page.get(b"Contents") else { return Some(data) };
+    let Ok(contents) = page.get(b"Contents") else {
+        return Some(data);
+    };
     let streams: Vec<&Object> = match resolve(doc, contents).ok()? {
         Object::Array(a) => a.iter().collect(),
         one => vec![one],
     };
     for s in streams {
-        let Object::Stream(s) = resolve(doc, s).ok()? else { return None };
+        let Object::Stream(s) = resolve(doc, s).ok()? else {
+            return None;
+        };
         data.extend(inflate(s, MAX_CONTENT).ok()?);
         data.push(b'\n');
         if data.len() > MAX_CONTENT {

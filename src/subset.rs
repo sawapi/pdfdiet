@@ -22,8 +22,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
 use crate::{
-    MAX_INFLATE, Walk, dict_int, filter_names, inflate, page_content_bounded, page_resource_dicts, resolve,
-    resolve_dict,
+    MAX_INFLATE, Walk, dict_int, filter_names, inflate, page_content_bounded, page_resource_dicts,
+    resolve, resolve_dict,
 };
 
 /// Character bytes shown per font dictionary, as raw PDF string bytes
@@ -87,7 +87,15 @@ pub(crate) fn collect_font_usage(doc: &Document) -> Option<FontUsage> {
         let data = page_content_bounded(doc, page_id)?;
         budget.page();
         let (content, _) = budget.parse(&data)?;
-        walk_ops(doc, &content.operations, &res_stack, None, &mut usage, 0, &mut budget)?;
+        walk_ops(
+            doc,
+            &content.operations,
+            &res_stack,
+            None,
+            &mut usage,
+            0,
+            &mut budget,
+        )?;
 
         // Annotation appearance streams.
         let page = doc.get_dictionary(page_id).ok()?;
@@ -134,9 +142,13 @@ pub(crate) fn collect_font_usage(doc: &Document) -> Option<FontUsage> {
 /// Mark every font in a resource dictionary's /Font as tainted (never
 /// subset). Fonts must be indirect, as everywhere in this walker.
 fn taint_resource_fonts(doc: &Document, res: &Dictionary, usage: &mut FontUsage) -> Option<()> {
-    let Ok(fonts) = res.get(b"Font") else { return Some(()) };
+    let Ok(fonts) = res.get(b"Font") else {
+        return Some(());
+    };
     for (_name, font) in resolve_dict(doc, fonts).ok()?.iter() {
-        let Object::Reference(fid) = font else { return None };
+        let Object::Reference(fid) = font else {
+            return None;
+        };
         usage.tainted.insert(*fid);
     }
     Some(())
@@ -160,12 +172,24 @@ fn walk_form<'a>(
         return None;
     };
     let mut res_stack: Vec<&Dictionary> = Vec::new();
-    if let Ok(rd) = stream.dict.get(b"Resources").and_then(|o| resolve_dict(doc, o)) {
+    if let Ok(rd) = stream
+        .dict
+        .get(b"Resources")
+        .and_then(|o| resolve_dict(doc, o))
+    {
         res_stack.push(rd);
     }
     res_stack.extend_from_slice(outer_res);
     let (content, opened) = budget.parse_stream(stream)?;
-    walk_ops(doc, &content.operations, &res_stack, cur_font, usage, depth + 1, budget)?;
+    walk_ops(
+        doc,
+        &content.operations,
+        &res_stack,
+        cur_font,
+        usage,
+        depth + 1,
+        budget,
+    )?;
     budget.close(opened);
     Some(())
 }
@@ -178,9 +202,10 @@ fn lookup_resource<'a>(
 ) -> Option<&'a Object> {
     for res in res_stack {
         if let Ok(dict) = res.get(category).and_then(|o| resolve_dict(doc, o))
-            && let Ok(obj) = dict.get(name) {
-                return Some(obj);
-            }
+            && let Ok(obj) = dict.get(name)
+        {
+            return Some(obj);
+        }
     }
     None
 }
@@ -242,9 +267,10 @@ fn walk_ops<'a>(
                 }
                 if let Ok(smask) = egs.get(b"SMask").and_then(|o| resolve(doc, o))
                     && let Object::Dictionary(sm) = smask
-                        && let Ok(g) = sm.get(b"G") {
-                            walk_form(doc, g, res_stack, cur_font, usage, depth, budget)?;
-                        }
+                    && let Ok(g) = sm.get(b"G")
+                {
+                    walk_form(doc, g, res_stack, cur_font, usage, depth, budget)?;
+                }
             }
             "Tj" | "'" => {
                 let Some(Object::String(bytes, _)) = op.operands.last() else {
@@ -283,13 +309,15 @@ fn walk_ops<'a>(
             "scn" | "SCN" => {
                 // Tiling pattern content streams can draw text of their own.
                 if let Some(Object::Name(name)) = op.operands.last()
-                    && let Some(pat) = lookup_resource(doc, res_stack, b"Pattern", name) {
-                        let pat_obj = resolve(doc, pat).ok()?;
-                        if let Object::Stream(ps) = pat_obj
-                            && dict_int(&ps.dict, b"PatternType") == Some(1) {
-                                walk_form(doc, pat, res_stack, None, usage, depth, budget)?;
-                            }
+                    && let Some(pat) = lookup_resource(doc, res_stack, b"Pattern", name)
+                {
+                    let pat_obj = resolve(doc, pat).ok()?;
+                    if let Object::Stream(ps) = pat_obj
+                        && dict_int(&ps.dict, b"PatternType") == Some(1)
+                    {
+                        walk_form(doc, pat, res_stack, None, usage, depth, budget)?;
                     }
+                }
             }
             "BI" => return None, // inline image: parser reliability unproven
             _ => {}
@@ -318,7 +346,10 @@ fn walk_type3<'a>(
         res_stack.push(rd);
     }
     res_stack.extend_from_slice(outer_res);
-    let procs = font.get(b"CharProcs").and_then(|o| resolve_dict(doc, o)).ok()?;
+    let procs = font
+        .get(b"CharProcs")
+        .and_then(|o| resolve_dict(doc, o))
+        .ok()?;
     for (_name, proc) in procs.iter() {
         let Object::Stream(s) = resolve(doc, proc).ok()? else {
             return None;
@@ -328,14 +359,26 @@ fn walk_type3<'a>(
         }
         budget.forms -= 1;
         let (content, opened) = budget.parse_stream(s)?;
-        walk_ops(doc, &content.operations, &res_stack, None, usage, depth + 1, budget)?;
+        walk_ops(
+            doc,
+            &content.operations,
+            &res_stack,
+            None,
+            usage,
+            depth + 1,
+            budget,
+        )?;
         budget.close(opened);
     }
     Some(())
 }
 
 fn record_string(usage: &mut FontUsage, font: ObjectId, bytes: &[u8]) {
-    usage.strings.entry(font).or_default().insert(bytes.to_vec());
+    usage
+        .strings
+        .entry(font)
+        .or_default()
+        .insert(bytes.to_vec());
 }
 
 // ---------------------------------------------------------------------------
@@ -391,9 +434,10 @@ fn glyph_name_to_unicode(name: &[u8]) -> Option<u16> {
         return hex4(h);
     }
     if let Some(h) = name.strip_prefix(b"u")
-        && h.len() == 4 {
-            return hex4(h);
-        }
+        && h.len() == 4
+    {
+        return hex4(h);
+    }
     const NAMES: &[(&[u8], u16)] = &[
         (b"space", 0x20),
         (b"exclam", 0x21),
@@ -451,10 +495,7 @@ fn glyph_name_to_unicode(name: &[u8]) -> Option<u16> {
     if name.len() == 1 && (name[0].is_ascii_alphanumeric()) {
         return Some(name[0] as u16); // single-letter names: A -> U+0041
     }
-    NAMES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|&(_, u)| u)
+    NAMES.iter().find(|(n, _)| *n == name).map(|&(_, u)| u)
 }
 
 /// The character-code interpretation of one font dictionary.
@@ -582,7 +623,11 @@ fn descriptor_program(doc: &Document, desc: &Dictionary) -> Option<ObjectId> {
 /// Every plausible viewer lookup path contributes (union), so a glyph
 /// survives no matter which path a given viewer takes. None = some code
 /// could not be resolved -> do not subset this program.
-fn used_gids(class: &FontClass, strings: &HashSet<Vec<u8>>, program: &[u8]) -> Option<BTreeSet<u16>> {
+fn used_gids(
+    class: &FontClass,
+    strings: &HashSet<Vec<u8>>,
+    program: &[u8],
+) -> Option<BTreeSet<u16>> {
     let cmap = CmapIndex::parse(program);
     let mut gids = BTreeSet::new();
     for s in strings {
@@ -595,10 +640,11 @@ fn used_gids(class: &FontClass, strings: &HashSet<Vec<u8>>, program: &[u8]) -> O
                     };
                     let mut found = false;
                     if let Some(u) = uni
-                        && let Some(g) = cmap.lookup(3, 1, u as u32) {
-                            gids.insert(g);
-                            found = true;
-                        }
+                        && let Some(g) = cmap.lookup(3, 1, u as u32)
+                    {
+                        gids.insert(g);
+                        found = true;
+                    }
                     // Symbolic-style fallbacks some viewers try:
                     for (p, e, c) in [
                         (3u16, 0u16, 0xF000 + code as u32),
@@ -679,19 +725,20 @@ impl CmapIndex {
         let mut subtables = Vec::new();
         let mut data = Vec::new();
         if let Some((off, len)) = find_table(font, b"cmap")
-            && let Some(table) = font.get(off..off + len) {
-                data = table.to_vec();
-                if let Some(n) = be16(table, 2) {
-                    for i in 0..n as usize {
-                        let rec = 4 + i * 8;
-                        if let (Some(p), Some(e), Some(o)) =
-                            (be16(table, rec), be16(table, rec + 2), be32(table, rec + 4))
-                        {
-                            subtables.push((p, e, o as usize));
-                        }
+            && let Some(table) = font.get(off..off + len)
+        {
+            data = table.to_vec();
+            if let Some(n) = be16(table, 2) {
+                for i in 0..n as usize {
+                    let rec = 4 + i * 8;
+                    if let (Some(p), Some(e), Some(o)) =
+                        (be16(table, rec), be16(table, rec + 2), be32(table, rec + 4))
+                    {
+                        subtables.push((p, e, o as usize));
                     }
                 }
             }
+        }
         CmapIndex { subtables, data }
     }
 
@@ -887,7 +934,10 @@ fn truncate_truetype(font: &[u8], count: u16, keep: Option<&BTreeSet<u16>>) -> O
     }
     let metric = |gid: usize| -> Option<(u16, u16)> {
         if gid < old_nhm {
-            Some((be16(font, hmtx_o + gid * 4)?, be16(font, hmtx_o + gid * 4 + 2)?))
+            Some((
+                be16(font, hmtx_o + gid * 4)?,
+                be16(font, hmtx_o + gid * 4 + 2)?,
+            ))
         } else {
             let advance = be16(font, hmtx_o + (old_nhm - 1) * 4)?;
             let lsb_off = hmtx_o + old_nhm * 4 + (gid - old_nhm) * 2;
@@ -916,11 +966,21 @@ fn truncate_truetype(font: &[u8], count: u16, keep: Option<&BTreeSet<u16>>) -> O
             let mut new_vmtx = Vec::with_capacity(count * 4);
             for gid in 0..count {
                 let (adv, tsb) = if gid < nvm {
-                    (be16(font, vmtx_o + gid * 4)?, be16(font, vmtx_o + gid * 4 + 2)?)
+                    (
+                        be16(font, vmtx_o + gid * 4)?,
+                        be16(font, vmtx_o + gid * 4 + 2)?,
+                    )
                 } else {
                     let advance = be16(font, vmtx_o + (nvm - 1) * 4)?;
                     let off = vmtx_o + nvm * 4 + (gid - nvm) * 2;
-                    (advance, if off + 2 <= vmtx_o + vmtx_l { be16(font, off)? } else { 0 })
+                    (
+                        advance,
+                        if off + 2 <= vmtx_o + vmtx_l {
+                            be16(font, off)?
+                        } else {
+                            0
+                        },
+                    )
                 };
                 new_vmtx.extend_from_slice(&adv.to_be_bytes());
                 new_vmtx.extend_from_slice(&tsb.to_be_bytes());
@@ -1124,7 +1184,9 @@ pub(crate) fn subset_truetype_fonts(
     let mut programs: HashMap<ObjectId, Vec<(ObjectId, FontClass)>> = HashMap::new();
     let mut blocked: HashSet<ObjectId> = HashSet::new();
     for (&fid, obj) in &doc.objects {
-        let Object::Dictionary(dict) = obj else { continue };
+        let Object::Dictionary(dict) = obj else {
+            continue;
+        };
         if !matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n == b"Font") {
             continue;
         }
@@ -1172,7 +1234,11 @@ pub(crate) fn subset_truetype_fonts(
             continue;
         };
         if !matches!(
-            filter_names(&stream.dict).iter().map(|s| s.as_str()).collect::<Vec<_>>().as_slice(),
+            filter_names(&stream.dict)
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
             [] | ["FlateDecode"]
         ) {
             continue;
@@ -1191,7 +1257,11 @@ pub(crate) fn subset_truetype_fonts(
         let Some(outlined) = outlined_gids(&font) else {
             continue;
         };
-        let mut keep: BTreeSet<u16> = if drop_outlines { BTreeSet::new() } else { outlined.clone() };
+        let mut keep: BTreeSet<u16> = if drop_outlines {
+            BTreeSet::new()
+        } else {
+            outlined.clone()
+        };
         keep.insert(0);
         let mut resolvable = true;
         for (fid, class) in &programs[&program_id] {
@@ -1223,8 +1293,7 @@ pub(crate) fn subset_truetype_fonts(
         } else {
             0
         };
-        let Some(new_font) =
-            truncate_truetype(&font, count as u16, (emptied > 0).then_some(&keep))
+        let Some(new_font) = truncate_truetype(&font, count as u16, (emptied > 0).then_some(&keep))
         else {
             continue;
         };
@@ -1252,7 +1321,11 @@ pub(crate) fn subset_truetype_fonts(
             program_id.1,
             old_slots,
             count,
-            if emptied > 0 { format!(", {emptied} unused outlines emptied") } else { String::new() },
+            if emptied > 0 {
+                format!(", {emptied} unused outlines emptied")
+            } else {
+                String::new()
+            },
             old_stored,
             new_stored
         ));
@@ -1359,7 +1432,10 @@ mod tests {
         let mut ap_dict = Dictionary::new();
         ap_dict.set("Subtype", Object::Name(b"Form".to_vec()));
         ap_dict.set("Resources", Object::Dictionary(font_resources(f2)));
-        let ap = doc.add_object(lopdf::Stream::new(ap_dict, b"BT /Helv 9 Tf (A) Tj ET".to_vec()));
+        let ap = doc.add_object(lopdf::Stream::new(
+            ap_dict,
+            b"BT /Helv 9 Tf (A) Tj ET".to_vec(),
+        ));
         let mut n = Dictionary::new();
         n.set("N", Object::Reference(ap));
         let mut annot = Dictionary::new();
@@ -1462,7 +1538,10 @@ mod tests {
     fn outlines_and_cmap() {
         let font = mini_font();
         assert_eq!(
-            outlined_gids(&font).unwrap().into_iter().collect::<Vec<_>>(),
+            outlined_gids(&font)
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![1, 2, 4]
         );
         let cmap = CmapIndex::parse(&font);
@@ -1492,7 +1571,10 @@ mod tests {
         assert_eq!(hmtx_l, 8);
         assert_eq!(be16(&out, hmtx_o), Some(500)); // gid 0 advance
         assert_eq!(be16(&out, hmtx_o + 4), Some(510)); // gid 1 advance
-        assert_eq!(outlined_gids(&out).unwrap().into_iter().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            outlined_gids(&out).unwrap().into_iter().collect::<Vec<_>>(),
+            vec![1]
+        );
         // Glyph 1's bytes survive verbatim.
         let (g_new, _) = find_table(&out, b"glyf").unwrap();
         let (g_old, _) = find_table(&font, b"glyf").unwrap();

@@ -30,7 +30,11 @@
 // the font passes index parallel tables by glyph id, and a few internal
 // helpers return tuples or take many plain parameters.
 #![forbid(unsafe_code)]
-#![allow(clippy::needless_range_loop, clippy::type_complexity, clippy::too_many_arguments)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::type_complexity,
+    clippy::too_many_arguments
+)]
 
 use image::DynamicImage;
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -40,6 +44,8 @@ pub mod ccitt;
 mod cffsubset;
 mod decode;
 mod dedup;
+#[cfg(test)]
+mod fontfuzz;
 mod fontmerge;
 mod fontunion;
 mod images;
@@ -48,8 +54,6 @@ mod limits;
 mod recompress;
 mod subset;
 mod type1;
-#[cfg(test)]
-mod fontfuzz;
 
 pub use images::{Extent, ImageInfo, collect_images};
 pub use limits::load_options;
@@ -59,12 +63,12 @@ use dedup::dedup_streams;
 use fontmerge::merge_font_subsets;
 use images::target_size;
 use jpeg::{
-    ChromaClass, CmykOutcome, classify_chroma, encode_jpeg, recompress_cmyk_jpeg, strip_jpeg_metadata,
-    try_lossless_jpeg_optimize,
+    ChromaClass, CmykOutcome, classify_chroma, encode_jpeg, recompress_cmyk_jpeg,
+    strip_jpeg_metadata, try_lossless_jpeg_optimize,
 };
 use recompress::{
-    BilevelOutcome, MatteHalf, TwoColor, bleed_under_soft_mask, recompress_bilevel, recompress_matte_pairs,
-    recompress_two_color, resize_image, smallest_encoding,
+    BilevelOutcome, MatteHalf, TwoColor, bleed_under_soft_mask, recompress_bilevel,
+    recompress_matte_pairs, recompress_two_color, resize_image, smallest_encoding,
 };
 
 // Shared with the font modules, which reach them through the crate root.
@@ -275,9 +279,9 @@ pub fn compress_document(
             .push("stripping owner-password protection (explicitly allowed)".into());
     }
     if opts.break_signatures && document_is_signed(doc) {
-        stats
-            .log
-            .push("document is signed; the signatures will not survive (explicitly allowed)".into());
+        stats.log.push(
+            "document is signed; the signatures will not survive (explicitly allowed)".into(),
+        );
     }
 
     // Premultiplied-alpha pairs must be resampled together; see
@@ -469,7 +473,11 @@ pub fn compress_document(
         if is_indexed && mode.is_empty() {
             mode = " [indexed]";
         }
-        let mode = if bled { format!("{mode} [bled]") } else { mode.to_string() };
+        let mode = if bled {
+            format!("{mode} [bled]")
+        } else {
+            mode.to_string()
+        };
         let new_colorspace = match indexed_base {
             Some((c, _, base)) if c == decoded_components => Some(base),
             _ if keep_colorspace => None,
@@ -485,15 +493,14 @@ pub fn compress_document(
         let encoded = if is_indexed && resized {
             smallest_encoding(&img, opts.jpeg_quality, sharp_chroma)
         } else {
-            encode_jpeg(&img, opts.jpeg_quality, sharp_chroma).map(|j| (j, Some(b"DCTDecode".as_slice())))
+            encode_jpeg(&img, opts.jpeg_quality, sharp_chroma)
+                .map(|j| (j, Some(b"DCTDecode".as_slice())))
         };
         let Some((jpeg, filter)) = encoded else {
-            stats
-                .log
-                .push(format!(
-                    "keep obj {} {}: jpeg encode failed or not baseline-conformant",
-                    info.id.0, info.id.1
-                ));
+            stats.log.push(format!(
+                "keep obj {} {}: jpeg encode failed or not baseline-conformant",
+                info.id.0, info.id.1
+            ));
             continue;
         };
 
@@ -553,7 +560,11 @@ pub fn compress_document(
                 String::new()
             },
             mode,
-            if filter == Some(b"FlateDecode".as_slice()) { " [flate]" } else { "" }
+            if filter == Some(b"FlateDecode".as_slice()) {
+                " [flate]"
+            } else {
+                ""
+            }
         ));
         stats.stream_bytes_saved += info.stream_len as i64 - jpeg.len() as i64;
         stats.images_recompressed += 1;
@@ -562,7 +573,9 @@ pub fn compress_document(
     if opts.strip_jpeg_metadata {
         let (stripped, saved) = strip_jpeg_metadata(doc);
         if stripped > 0 {
-            stats.log.push(format!("stripped metadata from {stripped} JPEG images ({saved} bytes)"));
+            stats.log.push(format!(
+                "stripped metadata from {stripped} JPEG images ({saved} bytes)"
+            ));
         }
         stats.stream_bytes_saved += saved;
     }
@@ -583,7 +596,8 @@ pub fn compress_document(
     stats.fonts_merged += unioned;
     stats.stream_bytes_saved += union_saved;
 
-    let (fonts_subset, subset_saved) = subset::subset_truetype_fonts(doc, &mut stats.log, opts.subset_outlines);
+    let (fonts_subset, subset_saved) =
+        subset::subset_truetype_fonts(doc, &mut stats.log, opts.subset_outlines);
     stats.fonts_subset = fonts_subset;
     stats.stream_bytes_saved += subset_saved;
     if opts.subset_outlines {
@@ -609,9 +623,9 @@ pub fn compress_document(
 
     let stripped = strip_piece_info(doc);
     if stripped > 0 {
-        stats
-            .log
-            .push(format!("stripped {stripped} PieceInfo private-data entries"));
+        stats.log.push(format!(
+            "stripped {stripped} PieceInfo private-data entries"
+        ));
     }
     let regen = strip_regenerable(doc);
     if regen > 0 {
@@ -748,7 +762,10 @@ pub(crate) fn resolve<'a>(doc: &'a Document, obj: &'a Object) -> lopdf::Result<&
     }
 }
 
-pub(crate) fn resolve_dict<'a>(doc: &'a Document, obj: &'a Object) -> lopdf::Result<&'a Dictionary> {
+pub(crate) fn resolve_dict<'a>(
+    doc: &'a Document,
+    obj: &'a Object,
+) -> lopdf::Result<&'a Dictionary> {
     match resolve(doc, obj)? {
         Object::Dictionary(d) => Ok(d),
         Object::Stream(s) => Ok(&s.dict),
