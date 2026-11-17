@@ -95,7 +95,7 @@ impl ImageInfo {
         u8::try_from(self.bpc).unwrap_or(0)
     }
 
-    /// The color space, e.g. `DeviceRGB`, `ICCBased(3)`, `Indexed`.
+    /// The color space, e.g. `DeviceRGB`, `ICCBased(N=3)`, `Indexed`.
     pub fn color_space(&self) -> &str {
         &self.color
     }

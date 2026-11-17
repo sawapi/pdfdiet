@@ -14,7 +14,7 @@ usage:
 options:
   --dpi <n>          target effective DPI (default: 150)
   --quality <n>      JPEG quality 1-100 (default: 80)
-  --subset-outlines  also drop embedded TrueType glyph outlines no text uses
+  --subset-outlines  also drop embedded glyph outlines (TrueType, CID-keyed CFF) no text uses
                      (smaller; the fonts can no longer show text added later)
   --strip-jpeg-metadata
                      remove EXIF (GPS, camera, dates), XMP and other metadata
