@@ -95,6 +95,12 @@
           <div class="error" role="alert">
             <p class="file-name" id="errName"></p>
             <p id="errMsg"></p>
+            <!-- Only for a document protected by an owner password: an
+                 explicit, per-file choice to drop the restrictions. -->
+            <div class="err-strip" id="errStrip" hidden>
+              <p>The copy would open without those restrictions (they can't be put back). Only if you're allowed to.</p>
+              <button class="btn primary" id="stripRun" type="button">Remove restrictions and compress</button>
+            </div>
             <button class="btn ghost" id="errAgain" type="button">Try another file</button>
           </div>
         </div>
@@ -167,7 +173,7 @@
         <p class="section-lead">Every change is either provably lossless or an image recompression within the quality you chose. Anything else passes through byte for byte, and the log says why.</p>
       </div>
       <ul class="checks">
-        <li><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#i-check"/></svg><span><b>Signed and protected documents</b> are refused rather than silently stripped of their signature or protection.</span></li>
+        <li><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#i-check"/></svg><span><b>Signed and protected documents</b> are refused rather than silently stripped of their signature or protection. For a document whose owner password only restricts printing or copying, you can choose to remove the restrictions.</span></li>
         <li><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#i-check"/></svg><span><b>Forms, annotations and accessibility tags</b> are kept, never flattened or dropped.</span></li>
         <li><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#i-check"/></svg><span><b>Encodings it can't decode with confidence</b> (JPEG 2000, unusual color spaces, predictors) stay exactly as they were.</span></li>
         <li><svg viewBox="0 0 20 20" aria-hidden="true"><use href="#i-check"/></svg><span><b>Hostile files</b> are bounded: decompression, image sizes and font programs all run under hard limits.</span></li>

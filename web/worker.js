@@ -9,12 +9,14 @@ self.onmessage = async ({ data: job }) => {
   try {
     await ready;
     const t0 = performance.now();
-    // Protection and signatures are never stripped on the page.
+    // Owner-password restrictions are removed only when the person chose
+    // to for this file; signatures are never broken on the page.
     const res = compress(new Uint8Array(job.input), {
       dpi: job.dpi,
       quality: job.quality,
       subsetOutlines: job.subsetOutlines,
       stripJpegMetadata: job.stripJpegMetadata,
+      stripProtection: job.stripProtection === true,
     });
     const reply = {
       id: job.id,

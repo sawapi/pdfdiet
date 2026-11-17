@@ -15,6 +15,10 @@ These are refused unless you explicitly allow it:
 | Digitally signed | Any rewrite invalidates the signatures | `--break-signatures` (`breakSignatures`, `break_signatures`) |
 | No readable pages | There is nothing to work on | — |
 
+On the [website](https://sawapi.github.io/pdfdiet/), a document refused
+for its owner password offers a button to remove the restrictions and
+compress it; nothing else there can be overridden.
+
 The signed case covers more than it first appears. Many fillable
 government forms carry a usage-rights signature, which is what lets a free
 PDF reader save your entries at all. Recompressing such a file would break

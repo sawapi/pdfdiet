@@ -214,10 +214,17 @@ h1 {
   padding: 10px 12px; font: .74rem/1.55 var(--mono); white-space: pre-wrap; word-break: break-word;
 }
 
-.error { gap: 8px; }
+/* "safe": if the content is taller than the panel, scroll from the top
+   rather than centering it with the file name cut off. */
+.error { gap: 8px; justify-content: safe center; }
+.error:has(.err-strip:not([hidden])) { gap: 6px; padding-block: 14px; }
 .error p { margin: 0; }
 .error #errMsg { color: var(--danger); }
 .error .btn { align-self: flex-start; margin-top: 8px; }
+.err-strip { display: flex; flex-direction: column; }
+.err-strip[hidden] { display: none; }
+.err-strip p { color: var(--muted); font-size: .88rem; }
+.error .err-strip + .btn { margin-top: 2px; }
 
 /* settings */
 .settings { display: grid; gap: 4px; padding: 14px 6px 4px; }
