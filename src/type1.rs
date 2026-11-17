@@ -31,7 +31,10 @@ fn decrypt(data: &[u8], key: u16, skip: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len().saturating_sub(skip));
     for (i, &c) in data.iter().enumerate() {
         let p = c ^ (r >> 8) as u8;
-        r = (c as u16).wrapping_add(r).wrapping_mul(52845).wrapping_add(22719);
+        r = (c as u16)
+            .wrapping_add(r)
+            .wrapping_mul(52845)
+            .wrapping_add(22719);
         if i >= skip {
             out.push(p);
         }
@@ -136,7 +139,9 @@ fn parse_bool(d: &[u8], key: &[u8]) -> Option<bool> {
 }
 
 fn parse_scalar(d: &[u8], key: &[u8]) -> Option<f64> {
-    parse_number_array(d, key).filter(|a| a.len() == 1).map(|a| a[0])
+    parse_number_array(d, key)
+        .filter(|a| a.len() == 1)
+        .map(|a| a[0])
 }
 
 /// Parse a PostScript name token starting at the '/'.
@@ -148,7 +153,10 @@ fn parse_name(d: &[u8], i: usize) -> Option<(Vec<u8>, usize)> {
     let mut j = i + 1;
     while j < d.len()
         && !(d[j] as char).is_ascii_whitespace()
-        && !matches!(d[j], b'/' | b'{' | b'}' | b'(' | b')' | b'[' | b']' | b'<' | b'>' | b'%')
+        && !matches!(
+            d[j],
+            b'/' | b'{' | b'}' | b'(' | b')' | b'[' | b']' | b'<' | b'>' | b'%'
+        )
     {
         j += 1;
     }
@@ -207,8 +215,8 @@ fn parse_type1(data: &[u8]) -> Option<Type1Font> {
         let m: [f64; 6] = m.try_into().ok()?;
         (m != [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]).then_some(m)
     });
-    let font_bbox = parse_number_array(clear, b"/FontBBox")
-        .and_then(|b| <[f64; 4]>::try_from(b).ok());
+    let font_bbox =
+        parse_number_array(clear, b"/FontBBox").and_then(|b| <[f64; 4]>::try_from(b).ok());
 
     // Encoding: StandardEncoding, or `dup <code> /<name> put` entries.
     let encoding = {
@@ -267,8 +275,12 @@ fn parse_type1(data: &[u8]) -> Option<Type1Font> {
         blue_scale: parse_scalar(&plain, b"/BlueScale"),
         blue_shift: parse_scalar(&plain, b"/BlueShift"),
         blue_fuzz: parse_scalar(&plain, b"/BlueFuzz"),
-        std_hw: parse_number_array(&plain, b"/StdHW").filter(|a| a.len() == 1).map(|a| a[0]),
-        std_vw: parse_number_array(&plain, b"/StdVW").filter(|a| a.len() == 1).map(|a| a[0]),
+        std_hw: parse_number_array(&plain, b"/StdHW")
+            .filter(|a| a.len() == 1)
+            .map(|a| a[0]),
+        std_vw: parse_number_array(&plain, b"/StdVW")
+            .filter(|a| a.len() == 1)
+            .map(|a| a[0]),
         stem_snap_h: parse_number_array(&plain, b"/StemSnapH"),
         stem_snap_v: parse_number_array(&plain, b"/StemSnapV"),
         force_bold: parse_bool(&plain, b"/ForceBold"),
@@ -492,7 +504,11 @@ impl<'a> Interp<'a> {
                 }
                 6 | 7 => {
                     let a = self.take(1)?;
-                    self.ops.push(if b == 6 { GOp::HLine(a[0]) } else { GOp::VLine(a[0]) });
+                    self.ops.push(if b == 6 {
+                        GOp::HLine(a[0])
+                    } else {
+                        GOp::VLine(a[0])
+                    });
                     i += 1;
                 }
                 8 => {
@@ -503,7 +519,11 @@ impl<'a> Interp<'a> {
                 30 | 31 => {
                     let a = self.take(4)?;
                     let a: [f64; 4] = a.try_into().ok()?;
-                    self.ops.push(if b == 30 { GOp::VHCurve(a) } else { GOp::HVCurve(a) });
+                    self.ops.push(if b == 30 {
+                        GOp::VHCurve(a)
+                    } else {
+                        GOp::HVCurve(a)
+                    });
                     i += 1;
                 }
                 9 => {
@@ -717,7 +737,10 @@ fn emit_type2(glyph: &Glyph, default_width: f64, nominal_width: f64) -> Option<V
         match op {
             GOp::Stem(horiz, pos, ext) => {
                 let list = if *horiz { &mut h } else { &mut v };
-                if !list.iter().any(|&(p, e)| stem_key(p, e) == stem_key(*pos, *ext)) {
+                if !list
+                    .iter()
+                    .any(|&(p, e)| stem_key(p, e) == stem_key(*pos, *ext))
+                {
                     list.push((*pos, *ext));
                 }
                 groups.last_mut().unwrap().push(stem_key(*pos, *ext));
@@ -733,7 +756,11 @@ fn emit_type2(glyph: &Glyph, default_width: f64, nominal_width: f64) -> Option<V
             _ => {}
         }
     }
-    if !v.iter().chain(&h).all(|s| s.0.is_finite() && s.1.is_finite()) {
+    if !v
+        .iter()
+        .chain(&h)
+        .all(|s| s.0.is_finite() && s.1.is_finite())
+    {
         return None;
     }
     h.sort_by(|a, b| a.partial_cmp(b).unwrap()); // finite by the check above
@@ -765,28 +792,35 @@ fn emit_type2(glyph: &Glyph, default_width: f64, nominal_width: f64) -> Option<V
     };
 
     // Stem declarations (delta-encoded, sorted).
-    let emit_stems = |out: &mut Vec<u8>,
-                          list: &[(f64, f64)],
-                          op: u8,
-                          w: &mut Option<f64>|
-     -> Option<()> {
-        if list.is_empty() {
-            return Some(());
-        }
-        first_arg(out, w)?;
-        let mut prev = 0.0;
-        for &(pos, ext) in list {
-            push_num(out, pos - prev)?;
-            push_num(out, ext)?;
-            prev = pos + ext;
-        }
-        out.push(op);
-        Some(())
-    };
+    let emit_stems =
+        |out: &mut Vec<u8>, list: &[(f64, f64)], op: u8, w: &mut Option<f64>| -> Option<()> {
+            if list.is_empty() {
+                return Some(());
+            }
+            first_arg(out, w)?;
+            let mut prev = 0.0;
+            for &(pos, ext) in list {
+                push_num(out, pos - prev)?;
+                push_num(out, ext)?;
+                prev = pos + ext;
+            }
+            out.push(op);
+            Some(())
+        };
     // hstem(hm) then vstem(hm); *hm forms whenever masks follow.
     let use_masks = masked || !counters.is_empty();
-    emit_stems(&mut out, &h, if use_masks { 18 } else { 1 }, &mut width_pending)?;
-    emit_stems(&mut out, &v, if use_masks { 23 } else { 3 }, &mut width_pending)?;
+    emit_stems(
+        &mut out,
+        &h,
+        if use_masks { 18 } else { 1 },
+        &mut width_pending,
+    )?;
+    emit_stems(
+        &mut out,
+        &v,
+        if use_masks { 23 } else { 3 },
+        &mut width_pending,
+    )?;
 
     let mask_bytes = nstems.div_ceil(8).max(1);
     let push_mask = |out: &mut Vec<u8>, op: u8, bits: &[usize]| {
@@ -1056,7 +1090,9 @@ pub(crate) fn type1_to_cff(data: &[u8]) -> Option<Vec<u8>> {
         *freq.entry(g.width.to_bits()).or_default() += 1;
     }
     let default_width = f64::from_bits(
-        freq.iter().max_by_key(|&(&w, &c)| (c, std::cmp::Reverse(w))).map(|(&w, _)| w)?,
+        freq.iter()
+            .max_by_key(|&(&w, &c)| (c, std::cmp::Reverse(w)))
+            .map(|(&w, _)| w)?,
     );
     let nominal_width = default_width;
 
@@ -1165,9 +1201,10 @@ pub(crate) fn type1_to_cff(data: &[u8]) -> Option<Vec<u8>> {
             dict_entry(&mut d, 0xC01, &[if v { 1.0 } else { 0.0 }]);
         }
         if let Some(v) = font.italic_angle
-            && v != 0.0 {
-                dict_entry(&mut d, 0xC02, &[v]);
-            }
+            && v != 0.0
+        {
+            dict_entry(&mut d, 0xC02, &[v]);
+        }
         if let Some(v) = font.underline_position {
             dict_entry(&mut d, 0xC03, &[v]);
         }
@@ -1203,8 +1240,11 @@ pub(crate) fn type1_to_cff(data: &[u8]) -> Option<Vec<u8>> {
     for _ in 0..2 {
         let top = build_top(offsets.0, offsets.1, offsets.2, offsets.3);
         let top_index = cff_index(&[top]);
-        let fixed =
-            header.len() + name_index.len() + top_index.len() + string_index.len() + gsubr_index.len();
+        let fixed = header.len()
+            + name_index.len()
+            + top_index.len()
+            + string_index.len()
+            + gsubr_index.len();
         let charset_off = fixed;
         let encoding_off = charset_off + charset.len();
         let cs_off = encoding_off + encoding.len();
@@ -1252,7 +1292,9 @@ fn type1_lengths_consistent(dict: &Dictionary, data: &[u8]) -> bool {
     if l1 < 0 || l2 < 0 || l3 < 0 {
         return false;
     }
-    let Some(eexec_at) = find(data, b"eexec") else { return false };
+    let Some(eexec_at) = find(data, b"eexec") else {
+        return false;
+    };
     let mut enc_start = eexec_at + 5;
     while matches!(data.get(enc_start), Some(b' ' | b'\r' | b'\n' | b'\t')) {
         enc_start += 1;
@@ -1264,7 +1306,9 @@ pub(crate) fn convert_type1_fonts(doc: &mut Document, log: &mut Vec<String>) -> 
     // program -> descriptors referencing it (shared programs update all).
     let mut programs: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     for (&id, obj) in &doc.objects {
-        let Object::Dictionary(dict) = obj else { continue };
+        let Object::Dictionary(dict) = obj else {
+            continue;
+        };
         if !matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n == b"FontDescriptor") {
             continue;
         }
@@ -1312,7 +1356,9 @@ pub(crate) fn convert_type1_fonts(doc: &mut Document, log: &mut Vec<String>) -> 
 
         let mut new_stream = stream.clone();
         new_stream.dict = Dictionary::new();
-        new_stream.dict.set("Subtype", Object::Name(b"Type1C".to_vec()));
+        new_stream
+            .dict
+            .set("Subtype", Object::Name(b"Type1C".to_vec()));
         new_stream.dict.set("Length", cff.len() as i64);
         new_stream.set_content(cff);
         new_stream.allows_compression = true;
@@ -1390,7 +1436,10 @@ mod tests {
         let mut out = Vec::new();
         for &p in std::iter::repeat_n(&0u8, lead).chain(plain.iter()) {
             let c = p ^ (r >> 8) as u8;
-            r = (c as u16).wrapping_add(r).wrapping_mul(52845).wrapping_add(22719);
+            r = (c as u16)
+                .wrapping_add(r)
+                .wrapping_mul(52845)
+                .wrapping_add(22719);
             out.push(c);
         }
         out
@@ -1472,7 +1521,7 @@ mod tests {
             139 + 20,
             248,
             136, // 500 = (248-247)*256 + 136 + 108
-            13, // hsbw
+            13,  // hsbw
             139,
             139 + 100,
             1, // 0 100 hstem
@@ -1495,7 +1544,9 @@ mod tests {
         font.extend_from_slice(b"/FontBBox {0 -10 400 712 }readonly def\n");
         font.extend_from_slice(b"/FontMatrix [0.001 0 0 0.001 0 0 ]readonly def\n");
         font.extend_from_slice(b"/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n");
-        font.extend_from_slice(b"dup 97 /a put\nreadonly def\ncurrentdict end\ncurrentfile eexec\n");
+        font.extend_from_slice(
+            b"dup 97 /a put\nreadonly def\ncurrentdict end\ncurrentfile eexec\n",
+        );
         font.extend_from_slice(&encrypt(&plain, 55665, 4));
         font.extend_from_slice(b"\n0000000000000000000000000000000000000000\n");
         font
@@ -1510,7 +1561,9 @@ mod tests {
         let osz = d[at + 2] as usize;
         let off = |i: usize| -> usize {
             let p = at + 3 + i * osz;
-            d[p..p + osz].iter().fold(0usize, |acc, &b| acc << 8 | b as usize)
+            d[p..p + osz]
+                .iter()
+                .fold(0usize, |acc, &b| acc << 8 | b as usize)
         };
         let data0 = at + 3 + (count + 1) * osz - 1;
         let items = (0..count)
@@ -1539,11 +1592,18 @@ mod tests {
             })
             .collect();
         assert_eq!(moves, vec![[30.0, 10.0]]); // 10 + sbx 20
-        assert!(glyph.ops.iter().any(|op| matches!(op, GOp::Line(a) if *a == [10.0, 20.0])));
-        assert!(glyph
-            .ops
-            .iter()
-            .any(|op| matches!(op, GOp::Stem(true, p, e) if *p == 0.0 && *e == 100.0)));
+        assert!(
+            glyph
+                .ops
+                .iter()
+                .any(|op| matches!(op, GOp::Line(a) if *a == [10.0, 20.0]))
+        );
+        assert!(
+            glyph
+                .ops
+                .iter()
+                .any(|op| matches!(op, GOp::Stem(true, p, e) if *p == 0.0 && *e == 100.0))
+        );
 
         // CFF assembly: header, name, one custom string, 2 charstrings.
         let cff = type1_to_cff(&t1).expect("conversion should succeed");

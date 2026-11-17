@@ -35,11 +35,15 @@ pub(crate) fn subset_cff_cid_fonts(doc: &mut Document, log: &mut Vec<String>) ->
     let mut users: HashMap<ObjectId, Vec<ObjectId>> = HashMap::new();
     let mut blocked: HashSet<ObjectId> = HashSet::new();
     for (&fid, obj) in &doc.objects {
-        let Object::Dictionary(font) = obj else { continue };
+        let Object::Dictionary(font) = obj else {
+            continue;
+        };
         if !matches!(font.get(b"Type"), Ok(Object::Name(n)) if n == b"Font") {
             continue;
         }
-        let Some((program, eligible)) = reach_program(doc, font) else { continue };
+        let Some((program, eligible)) = reach_program(doc, font) else {
+            continue;
+        };
         if eligible && !usage.tainted.contains(&fid) {
             users.entry(program).or_default().push(fid);
         } else {
@@ -47,7 +51,11 @@ pub(crate) fn subset_cff_cid_fonts(doc: &mut Document, log: &mut Vec<String>) ->
         }
     }
 
-    let mut ids: Vec<ObjectId> = users.keys().copied().filter(|p| !blocked.contains(p)).collect();
+    let mut ids: Vec<ObjectId> = users
+        .keys()
+        .copied()
+        .filter(|p| !blocked.contains(p))
+        .collect();
     ids.sort();
     let mut rewritten = 0usize;
     let mut dropped = 0i64;
@@ -66,19 +74,31 @@ pub(crate) fn subset_cff_cid_fonts(doc: &mut Document, log: &mut Vec<String>) ->
         if !ok {
             continue;
         }
-        let Ok(Object::Stream(stream)) = doc.get_object(program) else { continue };
+        let Ok(Object::Stream(stream)) = doc.get_object(program) else {
+            continue;
+        };
         if !matches!(
-            crate::filter_names(&stream.dict).iter().map(|f| f.as_str()).collect::<Vec<_>>().as_slice(),
+            crate::filter_names(&stream.dict)
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
             [] | ["FlateDecode"]
         ) {
             continue;
         }
-        let Ok(data) = inflate(stream, MAX_INFLATE) else { continue };
-        let Some((out, glyphs, emptied)) = subset_cid_cff(&data, &cids) else { continue };
+        let Ok(data) = inflate(stream, MAX_INFLATE) else {
+            continue;
+        };
+        let Some((out, glyphs, emptied)) = subset_cid_cff(&data, &cids) else {
+            continue;
+        };
         if out.len() >= data.len() {
             continue;
         }
-        let Some(Object::Stream(target)) = doc.objects.get_mut(&program) else { continue };
+        let Some(Object::Stream(target)) = doc.objects.get_mut(&program) else {
+            continue;
+        };
         target.dict.remove(b"Filter");
         target.dict.remove(b"DecodeParms");
         target.dict.set("Length", out.len() as i64);
@@ -117,18 +137,24 @@ fn reach_program(doc: &Document, font: &Dictionary) -> Option<(ObjectId, bool)> 
     };
     match font.get(b"Subtype") {
         Ok(Object::Name(n)) if n == b"Type0" => {
-            let Ok(Object::Array(desc)) = font.get(b"DescendantFonts").and_then(|o| resolve(doc, o)) else {
+            let Ok(Object::Array(desc)) =
+                font.get(b"DescendantFonts").and_then(|o| resolve(doc, o))
+            else {
                 return None;
             };
             let cid = resolve_dict(doc, desc.first()?).ok()?;
             let program = descriptor_program(cid)?;
             let identity = matches!(font.get(b"Encoding"), Ok(Object::Name(e)) if e == b"Identity-H" || e == b"Identity-V");
-            let cid_type0 = matches!(cid.get(b"Subtype"), Ok(Object::Name(s)) if s == b"CIDFontType0");
+            let cid_type0 =
+                matches!(cid.get(b"Subtype"), Ok(Object::Name(s)) if s == b"CIDFontType0");
             let cff_stream = matches!(
                 doc.get_object(program),
                 Ok(Object::Stream(s)) if matches!(s.dict.get(b"Subtype"), Ok(Object::Name(t)) if t == b"CIDFontType0C")
             );
-            Some((program, identity && cid_type0 && cff_stream && desc.len() == 1))
+            Some((
+                program,
+                identity && cid_type0 && cff_stream && desc.len() == 1,
+            ))
         }
         // A CIDFont reached directly is judged through its Type0 parent; a
         // simple font (Type1C) using a program blocks it.
@@ -150,7 +176,11 @@ struct Index {
 fn read_index(d: &[u8], at: usize) -> Option<Index> {
     let count = u16::from_be_bytes([*d.get(at)?, *d.get(at + 1)?]) as usize;
     if count == 0 {
-        return Some(Index { start: at, end: at + 2, items: Vec::new() });
+        return Some(Index {
+            start: at,
+            end: at + 2,
+            items: Vec::new(),
+        });
     }
     let os = *d.get(at + 2)? as usize;
     if !(1..=4).contains(&os) {
@@ -158,7 +188,11 @@ fn read_index(d: &[u8], at: usize) -> Option<Index> {
     }
     let off = |i: usize| -> Option<usize> {
         let p = at + 3 + i * os;
-        Some(d.get(p..p + os)?.iter().fold(0usize, |v, &b| (v << 8) | b as usize))
+        Some(
+            d.get(p..p + os)?
+                .iter()
+                .fold(0usize, |v, &b| (v << 8) | b as usize),
+        )
     };
     let base = at + 3 + (count + 1) * os - 1;
     let mut items = Vec::with_capacity(count);
@@ -175,7 +209,11 @@ fn read_index(d: &[u8], at: usize) -> Option<Index> {
         prev = next;
     }
     let end = base + prev;
-    (end <= d.len()).then_some(Index { start: at, end, items })
+    (end <= d.len()).then_some(Index {
+        start: at,
+        end,
+        items,
+    })
 }
 
 fn write_index(items: &[&[u8]]) -> Vec<u8> {
@@ -193,7 +231,8 @@ fn write_index(items: &[&[u8]]) -> Vec<u8> {
     };
     out.push(os as u8);
     let mut off = 1usize;
-    let push_off = |out: &mut Vec<u8>, v: usize| out.extend_from_slice(&(v as u32).to_be_bytes()[4 - os..]);
+    let push_off =
+        |out: &mut Vec<u8>, v: usize| out.extend_from_slice(&(v as u32).to_be_bytes()[4 - os..]);
     push_off(&mut out, off);
     for item in items {
         off += item.len();
@@ -228,7 +267,10 @@ fn parse_dict(d: &[u8]) -> Option<Vec<Entry>> {
                     i += 1;
                     b as u16
                 };
-                entries.push(Entry { operands: std::mem::take(&mut operands), op });
+                entries.push(Entry {
+                    operands: std::mem::take(&mut operands),
+                    op,
+                });
                 continue;
             }
             28 => 3,
@@ -324,7 +366,11 @@ fn read_charset(d: &[u8], at: usize, glyphs: usize) -> Option<(Vec<u16>, usize)>
             }
             1 | 2 => {
                 let first = be(p)?;
-                let left = if format == 1 { *d.get(p + 2)? as u16 } else { be(p + 2)? };
+                let left = if format == 1 {
+                    *d.get(p + 2)? as u16
+                } else {
+                    be(p + 2)?
+                };
                 p += if format == 1 { 3 } else { 4 };
                 for k in 0..=left {
                     cids.push(first.checked_add(k)?);
@@ -361,7 +407,9 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     let top = read_index(d, name.end)?;
     let strings = read_index(d, top.end)?;
     let gsubrs = read_index(d, strings.end)?;
-    let [(ts, te)] = top.items.as_slice() else { return None };
+    let [(ts, te)] = top.items.as_slice() else {
+        return None;
+    };
     let mut top_dict = parse_dict(&d[*ts..*te])?;
     if !top_dict.iter().any(|e| e.op == ROS)
         || top_dict.iter().any(|e| e.op == PRIVATE || e.op == 16)
@@ -390,8 +438,13 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     for &(s, e) in &fdarray.items {
         let dict = parse_dict(&d[s..e])?;
         let p = dict.iter().find(|x| x.op == PRIVATE)?;
-        let [size, off] = p.operands.as_slice() else { return None };
-        let (size, off) = (usize::try_from(int_value(size)?).ok()?, usize::try_from(int_value(off)?).ok()?);
+        let [size, off] = p.operands.as_slice() else {
+            return None;
+        };
+        let (size, off) = (
+            usize::try_from(int_value(size)?).ok()?,
+            usize::try_from(int_value(off)?).ok()?,
+        );
         let private = parse_dict(d.get(off..off.checked_add(size)?)?)?;
         let subrs = match single_int(&private, SUBRS) {
             Some(rel) => {
@@ -400,7 +453,11 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
             }
             None => None,
         };
-        fds.push(Fd { dict, private, subrs });
+        fds.push(Fd {
+            dict,
+            private,
+            subrs,
+        });
     }
 
     // New CharStrings: unused glyphs become a bare endchar.
@@ -442,7 +499,8 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     let fdarray_len = write_index(&fd_dicts.iter().map(|v| v.as_slice()).collect::<Vec<_>>()).len();
 
     let head = &d[..name.end]; // header and Name INDEX, verbatim
-    let mut pos = head.len() + top_len + (strings.end - strings.start) + (gsubrs.end - gsubrs.start);
+    let mut pos =
+        head.len() + top_len + (strings.end - strings.start) + (gsubrs.end - gsubrs.start);
     let charset_pos = pos;
     pos += charset_len;
     let fdselect_pos = pos;
@@ -458,7 +516,11 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
             set_operands(&mut fd.private, SUBRS, vec![int32(private_len)])?;
         }
         let private = write_dict(&fd.private);
-        set_operands(&mut fd.dict, PRIVATE, vec![int32(private.len()), int32(pos)])?;
+        set_operands(
+            &mut fd.dict,
+            PRIVATE,
+            vec![int32(private.len()), int32(pos)],
+        )?;
         pos += private.len() + fd.subrs.map_or(0, |(s, e)| e - s);
         privates.push(private);
     }
@@ -476,7 +538,9 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     out.extend_from_slice(&d[fdselect_at..fdselect_at + fds_len]);
     out.extend_from_slice(&charstrings);
     let fd_dicts: Vec<Vec<u8>> = fds.iter().map(|f| write_dict(&f.dict)).collect();
-    out.extend_from_slice(&write_index(&fd_dicts.iter().map(|v| v.as_slice()).collect::<Vec<_>>()));
+    out.extend_from_slice(&write_index(
+        &fd_dicts.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+    ));
     for (fd, private) in fds.iter().zip(&privates) {
         out.extend_from_slice(private);
         if let Some((s, e)) = fd.subrs {
@@ -548,7 +612,12 @@ mod tests {
         let private_pos = fda_pos + fda_len;
         let mut out = header;
         out.extend(name);
-        out.extend(write_index(&[&build(charset_pos, fdselect_pos, cs_pos, fda_pos)]));
+        out.extend(write_index(&[&build(
+            charset_pos,
+            fdselect_pos,
+            cs_pos,
+            fda_pos,
+        )]));
         out.extend(strings);
         out.extend(gsubrs);
         out.extend(charset);
@@ -591,7 +660,10 @@ mod tests {
         let fda = read_index(&out, single_int(&dict, FD_ARRAY).unwrap()).unwrap();
         let fd = parse_dict(&out[fda.items[0].0..fda.items[0].1]).unwrap();
         let p = fd.iter().find(|e| e.op == PRIVATE).unwrap();
-        let (size, off) = (int_value(&p.operands[0]).unwrap() as usize, int_value(&p.operands[1]).unwrap() as usize);
+        let (size, off) = (
+            int_value(&p.operands[0]).unwrap() as usize,
+            int_value(&p.operands[1]).unwrap() as usize,
+        );
         let private = parse_dict(&out[off..off + size]).unwrap();
         let subrs = read_index(&out, off + single_int(&private, SUBRS).unwrap()).unwrap();
         assert_eq!(subrs.items.len(), 2);

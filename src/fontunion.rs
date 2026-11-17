@@ -213,7 +213,10 @@ fn metric_compatible_subgroups(
                 break;
             }
             *budget -= cost;
-            if sg.iter().all(|&j| parsed[j].as_ref().is_some_and(|q| compatible(p, q))) {
+            if sg
+                .iter()
+                .all(|&j| parsed[j].as_ref().is_some_and(|q| compatible(p, q)))
+            {
                 home = Some(k);
                 break;
             }
@@ -273,7 +276,9 @@ pub(crate) fn strip_unused_font_tables(doc: &mut Document, log: &mut Vec<String>
             };
             for d in &descendants {
                 if let Ok(cid) = resolve_dict(doc, d)
-                    && let Ok(fd) = cid.get(b"FontDescriptor").and_then(|o| resolve_dict(doc, o))
+                    && let Ok(fd) = cid
+                        .get(b"FontDescriptor")
+                        .and_then(|o| resolve_dict(doc, o))
                     && let Some(p) = descriptor_program(fd)
                 {
                     keep_substitution.insert(p, ());
@@ -284,7 +289,9 @@ pub(crate) fn strip_unused_font_tables(doc: &mut Document, log: &mut Vec<String>
     // Descriptors can also sit directly inside CIDFont dictionaries.
     for obj in doc.objects.values() {
         let Object::Dictionary(f) = obj else { continue };
-        let Ok(Object::Array(descendants)) = f.get(b"DescendantFonts").and_then(|o| resolve(doc, o)) else {
+        let Ok(Object::Array(descendants)) =
+            f.get(b"DescendantFonts").and_then(|o| resolve(doc, o))
+        else {
             continue;
         };
         for d in descendants {
@@ -302,14 +309,22 @@ pub(crate) fn strip_unused_font_tables(doc: &mut Document, log: &mut Vec<String>
     let mut rewritten = 0usize;
     let mut saved = 0i64;
     for id in programs {
-        let Ok(Object::Stream(s)) = doc.get_object(id) else { continue };
+        let Ok(Object::Stream(s)) = doc.get_object(id) else {
+            continue;
+        };
         if !matches!(
-            crate::filter_names(&s.dict).iter().map(|f| f.as_str()).collect::<Vec<_>>().as_slice(),
+            crate::filter_names(&s.dict)
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
             [] | ["FlateDecode"]
         ) {
             continue;
         }
-        let Ok(font) = inflate(s, MAX_INFLATE) else { continue };
+        let Ok(font) = inflate(s, MAX_INFLATE) else {
+            continue;
+        };
         let before = s.content.len();
         if !matches!(be32(&font, 0), Some(0x0001_0000) | Some(0x7472_7565)) {
             continue; // not a TrueType sfnt ('true' or 1.0)
@@ -320,7 +335,8 @@ pub(crate) fn strip_unused_font_tables(doc: &mut Document, log: &mut Vec<String>
             .iter()
             .copied()
             .filter(|t| {
-                UNUSED_ALWAYS.contains(&t) || (substitution_ok && UNUSED_WITH_TOUNICODE.contains(&t))
+                UNUSED_ALWAYS.contains(&t)
+                    || (substitution_ok && UNUSED_WITH_TOUNICODE.contains(&t))
             })
             .collect();
         if dropped.is_empty() {
@@ -354,16 +370,23 @@ pub(crate) fn strip_unused_font_tables(doc: &mut Document, log: &mut Vec<String>
             continue;
         }
         let after = stream.content.len();
-        let Some(Object::Stream(target)) = doc.objects.get_mut(&id) else { continue };
+        let Some(Object::Stream(target)) = doc.objects.get_mut(&id) else {
+            continue;
+        };
         target.dict.set("Length1", rebuilt.len() as i64);
-        target.dict.set("Filter", Object::Name(b"FlateDecode".to_vec()));
+        target
+            .dict
+            .set("Filter", Object::Name(b"FlateDecode".to_vec()));
         target.dict.remove(b"DecodeParms");
         target.dict.set("Length", after as i64);
         target.set_content(stream.content);
         target.allows_compression = false;
         rewritten += 1;
         saved += before as i64 - after as i64;
-        let names: Vec<String> = dropped.iter().map(|t| String::from_utf8_lossy(t).trim().to_string()).collect();
+        let names: Vec<String> = dropped
+            .iter()
+            .map(|t| String::from_utf8_lossy(t).trim().to_string())
+            .collect();
         log.push(format!(
             "font program {} {}: dropped unused tables {}, {} -> {} bytes stored",
             id.0,
@@ -1196,7 +1219,11 @@ mod tests {
     fn unused_tables_are_dropped_and_glyphs_kept() {
         let f = font(
             &[&[], &glyph(1)],
-            &[(*b"GPOS", vec![7; 400]), (*b"GSUB", vec![8; 400]), (*b"fpgm", vec![1, 2])],
+            &[
+                (*b"GPOS", vec![7; 400]),
+                (*b"GSUB", vec![8; 400]),
+                (*b"fpgm", vec![1, 2]),
+            ],
         );
         let mut doc = Document::with_version("1.5");
         let mut st = lopdf::Stream::new(Dictionary::new(), f.clone());
@@ -1207,7 +1234,9 @@ mod tests {
         doc.add_object(desc);
         let mut log = Vec::new();
         assert_eq!(strip_unused_font_tables(&mut doc, &mut log).0, 1);
-        let Ok(Object::Stream(s)) = doc.get_object(program) else { panic!() };
+        let Ok(Object::Stream(s)) = doc.get_object(program) else {
+            panic!()
+        };
         let out = s.decompressed_content().unwrap();
         let t = tags(&out).unwrap();
         assert!(!t.contains(b"GPOS") && !t.contains(b"GSUB") && t.contains(b"fpgm"));
