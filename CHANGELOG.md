@@ -49,6 +49,7 @@
 - `Refusal` messages no longer name CLI flags (the CLI adds the hint), so
   they read right from the library too.
 - CLI: `--quality` must be 1-100 and `--dpi` positive.
+- Built on smallpeg 0.14.
 - Output PDFs are byte-for-byte the same as 0.1.1.
 
 ## 0.1.1
