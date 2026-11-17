@@ -81,12 +81,15 @@ jobs:
         run: |
           curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_116/bin" >> "$GITHUB_PATH"
+      - name: Install TypeScript
+        working-directory: pdfdiet/npm
+        run: npm ci
       - name: Build
         working-directory: pdfdiet
         run: ./build-npm.sh
-      - name: Test
-        working-directory: pdfdiet
-        run: node npm/test.mjs
+      - name: Test (smoke test and type test)
+        working-directory: pdfdiet/npm
+        run: npm test
       - name: Pack
         working-directory: pdfdiet/npm
         run: npm pack --dry-run

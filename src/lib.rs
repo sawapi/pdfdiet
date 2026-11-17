@@ -8,7 +8,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let input = std::fs::read("in.pdf")?;
-//! let opts = CompressOptions { target_dpi: 150.0, jpeg_quality: 80, ..Default::default() };
+//! let opts = CompressOptions::default().target_dpi(150.0).jpeg_quality(80);
 //! let (output, stats) = compress_bytes(&input, &opts)?;
 //! std::fs::write("out.pdf", output)?;
 //! // what was changed, and what was left alone and why
@@ -39,8 +39,7 @@
 use image::DynamicImage;
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
-#[doc(hidden)] // public for the g4_force verification example only
-pub mod ccitt;
+mod ccitt;
 mod cffsubset;
 mod decode;
 mod dedup;
@@ -55,8 +54,10 @@ mod recompress;
 mod subset;
 mod type1;
 
-pub use images::{Extent, ImageInfo, collect_images};
-pub use limits::load_options;
+pub use images::ImageInfo;
+
+use images::collect_images;
+use limits::load_options;
 
 use decode::{decode_image, indexed_palette};
 use dedup::dedup_streams;
@@ -75,10 +76,22 @@ use recompress::{
 pub(crate) use images::page_resource_dicts;
 pub(crate) use limits::{MAX_INFLATE, MAX_PASS_BYTES, Walk, inflate, page_content_bounded};
 
+/// Settings for [`compress_bytes`]. Start from [`Default`] and change what
+/// you need with the setters:
+///
+/// ```
+/// let opts = pdfdiet::CompressOptions::default()
+///     .target_dpi(200.0)
+///     .subset_outlines(true);
+/// assert_eq!((opts.target_dpi, opts.jpeg_quality), (200.0, 80));
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CompressOptions {
     /// Target effective DPI; images rendered above this are downsampled.
+    /// Default 150.
     pub target_dpi: f64,
-    /// JPEG quality for re-encoded images (1-100).
+    /// JPEG quality for re-encoded images, 1-100. Default 80.
     pub jpeg_quality: u8,
     /// Process a document whose only protection is an owner password
     /// (permission restrictions such as no-print / no-copy). pdfdiet cannot
@@ -119,8 +132,47 @@ impl Default for CompressOptions {
     }
 }
 
+impl CompressOptions {
+    /// Set [`target_dpi`](CompressOptions::target_dpi).
+    pub fn target_dpi(mut self, dpi: f64) -> Self {
+        self.target_dpi = dpi;
+        self
+    }
+
+    /// Set [`jpeg_quality`](CompressOptions::jpeg_quality).
+    pub fn jpeg_quality(mut self, quality: u8) -> Self {
+        self.jpeg_quality = quality;
+        self
+    }
+
+    /// Set [`strip_protection`](CompressOptions::strip_protection).
+    pub fn strip_protection(mut self, on: bool) -> Self {
+        self.strip_protection = on;
+        self
+    }
+
+    /// Set [`break_signatures`](CompressOptions::break_signatures).
+    pub fn break_signatures(mut self, on: bool) -> Self {
+        self.break_signatures = on;
+        self
+    }
+
+    /// Set [`subset_outlines`](CompressOptions::subset_outlines).
+    pub fn subset_outlines(mut self, on: bool) -> Self {
+        self.subset_outlines = on;
+        self
+    }
+
+    /// Set [`strip_jpeg_metadata`](CompressOptions::strip_jpeg_metadata).
+    pub fn strip_jpeg_metadata(mut self, on: bool) -> Self {
+        self.strip_jpeg_metadata = on;
+        self
+    }
+}
+
 /// Why a document was refused rather than compressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Refusal {
     /// Password-protected: the contents could not be decrypted, so any
     /// output would be an unreadable stub.
@@ -143,11 +195,10 @@ impl std::fmt::Display for Refusal {
             }
             Refusal::Protected => {
                 "document is protected by an owner password; compressing would strip its \
-                 permission restrictions — pass --strip-protection to do that explicitly"
+                 permission restrictions"
             }
             Refusal::Signed => {
-                "document is digitally signed; compressing would invalidate the signatures — \
-                 pass --break-signatures to do that explicitly"
+                "document is digitally signed; compressing would invalidate the signatures"
             }
             Refusal::Empty => "document has no readable pages",
         })
@@ -156,10 +207,28 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
-/// Errors from [`compress_bytes`].
+// Refusal is non_exhaustive, so other crates match it with a wildcard and
+// would not notice a new variant. This exhaustive match does: adding one
+// fails to compile here until the reason strings in wasm/src/lib.rs and
+// npm/src/core.mts (FailureReason) are updated too.
+#[cfg(test)]
+#[allow(dead_code)]
+fn refusal_reasons_are_mapped(r: Refusal) -> &'static str {
+    match r {
+        Refusal::Encrypted => "encrypted",
+        Refusal::Protected => "protected",
+        Refusal::Signed => "signed",
+        Refusal::Empty => "empty",
+    }
+}
+
+/// Errors from [`compress_bytes`] and [`inspect_bytes`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
-    Pdf(lopdf::Error),
+    /// The input could not be read or written as a PDF.
+    Pdf(PdfError),
+    /// The document was readable but deliberately left alone.
     Refused(Refusal),
 }
 
@@ -174,10 +243,22 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<lopdf::Error> for Error {
-    fn from(e: lopdf::Error) -> Self {
-        Error::Pdf(e)
+/// A PDF that could not be parsed (or serialized). The message says what
+/// went wrong; the details are not part of the API.
+#[derive(Debug)]
+pub struct PdfError(lopdf::Error);
+
+impl std::fmt::Display for PdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
+}
+
+impl std::error::Error for PdfError {}
+
+// Not a From impl: that would put lopdf's error type in the public API.
+fn pdf_error(e: lopdf::Error) -> Error {
+    Error::Pdf(PdfError(e))
 }
 
 impl From<Refusal> for Error {
@@ -186,14 +267,25 @@ impl From<Refusal> for Error {
     }
 }
 
+/// What [`compress_bytes`] did.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CompressStats {
+    /// Image XObjects in the document.
     pub images_total: usize,
+    /// Images downsampled, re-encoded or losslessly re-optimized.
     pub images_recompressed: usize,
+    /// Duplicate streams merged into one copy.
     pub streams_deduped: usize,
+    /// Duplicate font subsets merged.
     pub fonts_merged: usize,
+    /// Fonts whose unused tables or glyphs were dropped.
     pub fonts_subset: usize,
+    /// Type 1 fonts converted to CFF.
     pub fonts_converted: usize,
+    /// Bytes saved in stream data (before the final write's own savings).
     pub stream_bytes_saved: i64,
+    /// What was changed, and what was left alone and why, one line each.
     pub log: Vec<String>,
 }
 
@@ -202,18 +294,18 @@ pub fn compress_bytes(
     input: &[u8],
     opts: &CompressOptions,
 ) -> Result<(Vec<u8>, CompressStats), Error> {
-    let mut doc = Document::load_mem_with_options(input, load_options()).map_err(Error::Pdf)?;
+    let mut doc = Document::load_mem_with_options(input, load_options()).map_err(pdf_error)?;
     let stats = compress_document(&mut doc, opts)?;
     let mut out = Vec::new();
     doc.save_with_options(&mut out, compact_save_options())
-        .map_err(|e| Error::Pdf(e.into()))?;
+        .map_err(|e| pdf_error(e.into()))?;
     Ok((out, stats))
 }
 
 /// Serialization settings for the final write: pack non-stream objects into
 /// object streams and use a cross-reference stream (PDF 1.5). On dictionary-
 /// heavy documents the plain-text structure can be nearly half the file.
-pub fn compact_save_options() -> lopdf::SaveOptions {
+fn compact_save_options() -> lopdf::SaveOptions {
     lopdf::SaveOptions {
         use_object_streams: true,
         use_xref_streams: true,
@@ -223,8 +315,8 @@ pub fn compact_save_options() -> lopdf::SaveOptions {
 }
 
 /// List the images embedded in a PDF byte buffer.
-pub fn inspect_bytes(input: &[u8]) -> Result<Vec<ImageInfo>, lopdf::Error> {
-    let doc = Document::load_mem_with_options(input, load_options())?;
+pub fn inspect_bytes(input: &[u8]) -> Result<Vec<ImageInfo>, Error> {
+    let doc = Document::load_mem_with_options(input, load_options()).map_err(pdf_error)?;
     Ok(collect_images(&doc))
 }
 
@@ -257,7 +349,7 @@ pub fn format_inspect_table(images: &[ImageInfo]) -> String {
 }
 
 /// Recompress the images inside a document (in place).
-pub fn compress_document(
+pub(crate) fn compress_document(
     doc: &mut Document,
     opts: &CompressOptions,
 ) -> Result<CompressStats, Refusal> {

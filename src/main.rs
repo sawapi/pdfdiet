@@ -3,8 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use lopdf::Document;
-use pdfdiet::{CompressOptions, collect_images, compress_document};
+use pdfdiet::{CompressOptions, compress_bytes, format_inspect_table, inspect_bytes};
 
 #[derive(Parser)]
 #[command(
@@ -27,10 +26,10 @@ enum Cmd {
         #[arg(short, long)]
         output: PathBuf,
         /// Target effective DPI; images rendered above this are downsampled
-        #[arg(long, default_value_t = 150.0)]
+        #[arg(long, default_value_t = 150.0, value_parser = positive_dpi)]
         dpi: f64,
         /// JPEG quality for re-encoded images (1-100)
-        #[arg(long, default_value_t = 80)]
+        #[arg(long, default_value_t = 80, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
         /// Process a document protected only by an owner password,
         /// stripping its permission restrictions
@@ -76,17 +75,34 @@ fn main() {
         ),
     };
     if let Err(e) = result {
-        eprintln!("error: {e}");
+        // The library's refusals say what would happen; the CLI also says
+        // which flag allows it.
+        let hint = match e.downcast_ref::<pdfdiet::Error>() {
+            Some(pdfdiet::Error::Refused(pdfdiet::Refusal::Protected)) => {
+                " — pass --strip-protection to do that explicitly"
+            }
+            Some(pdfdiet::Error::Refused(pdfdiet::Refusal::Signed)) => {
+                " — pass --break-signatures to do that explicitly"
+            }
+            _ => "",
+        };
+        eprintln!("error: {e}{hint}");
         std::process::exit(1);
+    }
+}
+
+fn positive_dpi(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+        _ => Err("must be a positive number".into()),
     }
 }
 
 type AnyError = Box<dyn std::error::Error>;
 
 fn inspect(input: &PathBuf) -> Result<(), AnyError> {
-    let doc = Document::load_with_options(input, pdfdiet::load_options())?;
-    let images = collect_images(&doc);
-    println!("{}", pdfdiet::format_inspect_table(&images));
+    let images = inspect_bytes(&std::fs::read(input)?)?;
+    println!("{}", format_inspect_table(&images));
     Ok(())
 }
 
@@ -101,20 +117,15 @@ fn compress(
     subset_outlines: bool,
     strip_jpeg_metadata: bool,
 ) -> Result<(), AnyError> {
-    let mut doc = Document::load_with_options(input, pdfdiet::load_options())?;
-    let stats = compress_document(
-        &mut doc,
-        &CompressOptions {
-            target_dpi: dpi,
-            jpeg_quality: quality,
-            strip_protection,
-            break_signatures,
-            subset_outlines,
-            strip_jpeg_metadata,
-        },
-    )?;
-    let mut out = std::fs::File::create(output)?;
-    doc.save_with_options(&mut out, pdfdiet::compact_save_options())?;
+    let opts = CompressOptions::default()
+        .target_dpi(dpi)
+        .jpeg_quality(quality)
+        .strip_protection(strip_protection)
+        .break_signatures(break_signatures)
+        .subset_outlines(subset_outlines)
+        .strip_jpeg_metadata(strip_jpeg_metadata);
+    let (pdf, stats) = compress_bytes(&std::fs::read(input)?, &opts)?;
+    std::fs::write(output, pdf)?;
 
     for line in &stats.log {
         println!("{line}");

@@ -46,10 +46,10 @@ impl Mat {
 /// Largest physical size (in inches) at which an image is rendered. When an
 /// image is used multiple times we keep the maximum: preserving quality at the
 /// largest rendering automatically satisfies every smaller one.
-#[derive(Clone, Copy, Default)]
-pub struct Extent {
-    pub w_inch: f64,
-    pub h_inch: f64,
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Extent {
+    pub(crate) w_inch: f64,
+    pub(crate) h_inch: f64,
 }
 
 impl Extent {
@@ -59,21 +59,83 @@ impl Extent {
     }
 }
 
-/// Static information about an image XObject.
+/// An image in a document, as listed by [`inspect_bytes`](crate::inspect_bytes).
+#[derive(Clone, Debug)]
 pub struct ImageInfo {
-    pub id: ObjectId,
-    pub width: i64,
-    pub height: i64,
-    pub bpc: i64,
-    pub color: String,
-    pub components: Option<u8>,
-    pub filters: Vec<String>,
-    pub stream_len: usize,
-    pub extent: Option<Extent>,
+    pub(crate) id: ObjectId,
+    pub(crate) width: i64,
+    pub(crate) height: i64,
+    pub(crate) bpc: i64,
+    pub(crate) color: String,
+    pub(crate) components: Option<u8>,
+    pub(crate) filters: Vec<String>,
+    pub(crate) stream_len: usize,
+    pub(crate) extent: Option<Extent>,
 }
 
 impl ImageInfo {
+    /// PDF object number and generation.
+    pub fn object_id(&self) -> (u32, u16) {
+        self.id
+    }
+
+    /// Width in pixels as the image declares it; 0 if missing or invalid.
+    pub fn width(&self) -> u32 {
+        u32::try_from(self.width).unwrap_or(0)
+    }
+
+    /// Height in pixels as the image declares it; 0 if missing or invalid.
+    pub fn height(&self) -> u32 {
+        u32::try_from(self.height).unwrap_or(0)
+    }
+
+    /// Bits per color component; 0 if missing or invalid (as for JPX
+    /// images, which leave it to the codestream).
+    pub fn bits_per_component(&self) -> u8 {
+        u8::try_from(self.bpc).unwrap_or(0)
+    }
+
+    /// The color space, e.g. `DeviceRGB`, `ICCBased(3)`, `Indexed`.
+    pub fn color_space(&self) -> &str {
+        &self.color
+    }
+
+    /// Color components per pixel, if known.
+    pub fn components(&self) -> Option<u8> {
+        self.components
+    }
+
+    /// Stream filters in order, e.g. `["DCTDecode"]`.
+    pub fn filters(&self) -> &[String] {
+        &self.filters
+    }
+
+    /// Encoded size of the image stream in bytes.
+    pub fn stream_len(&self) -> usize {
+        self.stream_len
+    }
+
+    /// Largest size the image is drawn at on any page, in inches (width,
+    /// height); `None` if no page draws it. On a page whose content cannot
+    /// be interpreted, every image the page uses counts as drawn at the
+    /// full page size.
+    pub fn drawn_size(&self) -> Option<(f64, f64)> {
+        self.extent.map(|e| (e.w_inch, e.h_inch))
+    }
+
+    /// Effective resolution (horizontal, vertical) at that size; `None` if
+    /// no page draws it, only vanishingly small, or the pixel size is
+    /// missing or invalid.
     pub fn dpi(&self) -> Option<(f64, f64)> {
+        if self.width() == 0 || self.height() == 0 {
+            return None;
+        }
+        self.measured_dpi()
+    }
+
+    /// The resolution compression works from (and the CLI table shows),
+    /// from the raw declared size.
+    pub(crate) fn measured_dpi(&self) -> Option<(f64, f64)> {
         let e = self.extent?;
         if e.w_inch < 0.01 || e.h_inch < 0.01 {
             return None;
@@ -81,8 +143,8 @@ impl ImageInfo {
         Some((self.width as f64 / e.w_inch, self.height as f64 / e.h_inch))
     }
 
-    pub fn dpi_label(&self) -> String {
-        match self.dpi() {
+    pub(crate) fn dpi_label(&self) -> String {
+        match self.measured_dpi() {
             Some((x, y)) if (x - y).abs() < x * 0.05 => format!("{x:.0}"),
             Some((x, y)) => format!("{x:.0}/{y:.0}"),
             None => "?".into(),
@@ -94,7 +156,7 @@ impl ImageInfo {
 /// the target (5% hysteresis).
 pub(crate) fn target_size(info: &ImageInfo, opts: &CompressOptions) -> (u32, u32) {
     let (mut new_w, mut new_h) = (info.width as f64, info.height as f64);
-    if let Some((dpi_x, dpi_y)) = info.dpi() {
+    if let Some((dpi_x, dpi_y)) = info.measured_dpi() {
         if dpi_x > opts.target_dpi * 1.05 {
             new_w = info.width as f64 * opts.target_dpi / dpi_x;
         }
@@ -105,7 +167,7 @@ pub(crate) fn target_size(info: &ImageInfo, opts: &CompressOptions) -> (u32, u32
     ((new_w.round() as u32).max(1), (new_h.round() as u32).max(1))
 }
 
-pub fn collect_images(doc: &Document) -> Vec<ImageInfo> {
+pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
     let usage = image_usage(doc);
 
     let mut images = Vec::new();

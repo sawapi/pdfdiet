@@ -3,3 +3,5 @@
 /npm/node
 /npm/web
 /npm/*.tgz
+/npm/dist
+/npm/node_modules

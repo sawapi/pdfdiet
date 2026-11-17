@@ -90,8 +90,9 @@ jobs:
       - name: Build and test the npm package
         working-directory: pdfdiet
         run: |
+          npm ci --prefix npm
           ./build-npm.sh
-          node npm/test.mjs
+          npm test --prefix npm
 
       # The log lists the files and the sha512 integrity (the value
       # `npm view @sawapi/pdfdiet@<version> dist.integrity` reports once
@@ -122,8 +123,9 @@ jobs:
           mkdir "$RUNNER_TEMP/smoke" && cd "$RUNNER_TEMP/smoke"
           npm init -y > /dev/null
           npm install "$RUNNER_TEMP"/pack/sawapi-pdfdiet-*.tgz
-          node -e 'const p = require("@sawapi/pdfdiet"); let ok = false; try { p.compress_pdf(new Uint8Array([1, 2, 3]), 150, 80); } catch { ok = true; } if (!ok) process.exit(1); console.log("require ok")'
-          node --input-type=module -e 'import { inspect_pdf } from "@sawapi/pdfdiet"; let ok = false; try { inspect_pdf(new Uint8Array([1, 2, 3])); } catch { ok = true; } if (!ok) process.exit(1); console.log("import ok")'
+          node -e 'const p = require("@sawapi/pdfdiet"); let ok = false; try { p.compress(new Uint8Array([1, 2, 3])); } catch (e) { ok = e instanceof p.PdfdietError && e.reason === "invalid-pdf"; } if (!ok) process.exit(1); console.log("require ok")'
+          node --input-type=module -e 'import { inspect, PdfdietError } from "@sawapi/pdfdiet"; let ok = false; try { inspect(new Uint8Array([1, 2, 3])); } catch (e) { ok = e instanceof PdfdietError && e.reason === "invalid-pdf"; } if (!ok) process.exit(1); console.log("import ok")'
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; import { createRequire } from "node:module"; import { init, inspect, PdfdietError } from "@sawapi/pdfdiet/web"; const wasm = readFileSync(createRequire(import.meta.url).resolve("@sawapi/pdfdiet/package.json").replace(/package\.json$/, "web/pdfdiet_wasm_bg.wasm")); await init(wasm); let ok = false; try { inspect(new Uint8Array([1, 2, 3])); } catch (e) { ok = e instanceof PdfdietError && e.reason === "invalid-pdf"; } if (!ok) process.exit(1); console.log("web ok")'
           npx --no-install pdfdiet 2>&1 | grep -q "usage" && echo "cli ok"
 
   publish-crate:

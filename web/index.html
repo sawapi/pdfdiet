@@ -202,7 +202,7 @@ pdfdiet compress in.pdf -o out.pdf --subset-outlines --strip-jpeg-metadata</code
           <pre role="tabpanel" id="ex-rs-lib" aria-labelledby="tab-rs-lib" hidden><code>use pdfdiet::{compress_bytes, CompressOptions};
 
 let input = std::fs::read("in.pdf")?;
-let opts = CompressOptions { target_dpi: 150.0, jpeg_quality: 80, ..Default::default() };
+let opts = CompressOptions::default().target_dpi(150.0).jpeg_quality(80);
 let (output, stats) = compress_bytes(&amp;input, &amp;opts)?;
 std::fs::write("out.pdf", output)?;
 <span class="c">// what was changed, and what was left alone and why</span>
@@ -226,16 +226,16 @@ for line in &amp;stats.log { println!("{line}"); }</code></pre>
           <pre role="tabpanel" id="ex-js-cli" aria-labelledby="tab-js-cli"><code><span class="c"># no install needed</span>
 npx @sawapi/pdfdiet inspect report.pdf
 npx @sawapi/pdfdiet compress report.pdf -o report.small.pdf</code></pre>
-          <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress_pdf } from "@sawapi/pdfdiet";
+          <pre role="tabpanel" id="ex-node" aria-labelledby="tab-node" hidden><code>import { compress } from "@sawapi/pdfdiet";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const res = compress_pdf(readFileSync("in.pdf"), 150, 80); <span class="c">// bytes, dpi, quality</span>
+const res = compress(readFileSync("in.pdf"), { dpi: 150, quality: 80 });
 writeFileSync("out.pdf", res.output);
-console.log(res.log);</code></pre>
-          <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import init, { compress_pdf } from "@sawapi/pdfdiet/web";
+console.log(res.log.join("\n"));</code></pre>
+          <pre role="tabpanel" id="ex-web" aria-labelledby="tab-web" hidden><code>import { init, compress } from "@sawapi/pdfdiet/web";
 
 await init(); <span class="c">// loads the .wasm file once</span>
-const res = compress_pdf(new Uint8Array(await file.arrayBuffer()), 150, 80);
+const res = compress(new Uint8Array(await file.arrayBuffer()));
 const blob = new Blob([res.output], { type: "application/pdf" });</code></pre>
         </div>
       </div>

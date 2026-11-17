@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build the wasm for the npm package, targeting both Node (npm/node) and
-# browsers and bundlers (npm/web).
+# Build the npm package: the wasm for Node (npm/node) and for browsers and
+# bundlers (npm/web), plus the typed API around them (npm/src -> npm/dist).
+# Needs `npm ci` in npm/ once, for the TypeScript compiler.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -9,6 +10,12 @@ HAVE=$(wasm-bindgen --version 2>/dev/null | awk '{print $2}' || true)
 if [[ "$HAVE" != "$WANT" ]]; then
   echo "wasm-bindgen CLI $WANT is required (found: ${HAVE:-none})." >&2
   echo "Install it with: cargo install wasm-bindgen-cli --version $WANT --locked" >&2
+  exit 1
+fi
+
+TSC=npm/node_modules/.bin/tsc
+if [[ ! -x "$TSC" ]]; then
+  echo "TypeScript is not installed; run \`npm ci\` in npm/ first." >&2
   exit 1
 fi
 
@@ -40,6 +47,9 @@ if command -v wasm-opt >/dev/null; then
 else
   echo "note: wasm-opt not found; the .wasm files are not size-optimized" >&2
 fi
+
+rm -rf npm/dist
+"$TSC" -p npm
 
 cp LICENSE-MIT LICENSE-APACHE npm/
 ls -l npm/node/*.wasm npm/web/*.wasm
