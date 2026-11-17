@@ -23,11 +23,14 @@ jobs:
           path: smallpeg
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: pdfdiet
+      - name: Format
+        working-directory: pdfdiet
+        run: cargo fmt --all --check
       - name: Clippy
         working-directory: pdfdiet
         run: cargo clippy --release --all-targets -- -D warnings
