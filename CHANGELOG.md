@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- smallpeg 0.15: fixes a panic on crafted Huffman frequency patterns,
+  rejects progressive JPEGs whose successive-approximation scans are out of
+  order (such images are now left as they are), and keeps APPn/COM segments
+  that follow the frame header in place. Output for ordinary documents is
+  unchanged.
 - Hardening against hostile documents, from a source review. Output for
   ordinary documents is unchanged.
   - 1-bit images wider or taller than 65535 pixels are left alone, as on
