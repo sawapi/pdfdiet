@@ -33,6 +33,11 @@ pub(crate) const MAX_LIVE_COST: usize = 800_000;
 /// memory as well as time. The costliest real document seen spends 1.5M;
 /// past this, pages take the walkers' conservative fallbacks.
 pub(crate) const MAX_WALK_COST: usize = 6_000_000;
+/// Bytes one walk may inflate from form and glyph-procedure streams in
+/// total, counting every invocation. Parse cost alone does not bound this:
+/// whitespace costs nothing to parse but still has to be inflated and
+/// scanned, and a reused form is inflated again at every use.
+pub(crate) const MAX_WALK_BYTES: usize = 1 << 30;
 
 /// Upper estimate of what lopdf's parse of content bytes costs, in
 /// operations: one per operator-like token (a run starting with a letter,
@@ -93,6 +98,7 @@ pub(crate) struct Walk {
     pub(crate) forms: u32,
     live: usize,
     parsed: usize,
+    inflated: usize,
 }
 
 /// What one parse holds open in a Walk, to give back with `close`.
@@ -104,6 +110,7 @@ impl Walk {
             forms,
             live: 0,
             parsed: 0,
+            inflated: 0,
         }
     }
 
@@ -131,7 +138,10 @@ impl Walk {
 
     /// Inflate and parse a form or glyph-procedure stream.
     pub(crate) fn parse_stream(&mut self, stream: &lopdf::Stream) -> Option<(Content, Opened)> {
-        self.parse(&inflate(stream, MAX_CONTENT).ok()?)
+        let room = MAX_WALK_BYTES - self.inflated;
+        let data = inflate(stream, MAX_CONTENT.min(room)).ok()?;
+        self.inflated += data.len();
+        self.parse(&data)
     }
 
     pub(crate) fn close(&mut self, opened: Opened) {
@@ -179,6 +189,22 @@ pub(crate) fn page_content_bounded(doc: &Document, page_id: ObjectId) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_inflation_is_charged_to_the_walk() {
+        // Whitespace costs nothing to parse, so a form of 32 MiB of spaces
+        // reused over and over was bounded only by the invocation count.
+        let mut form = lopdf::Stream::new(Dictionary::new(), vec![b' '; MAX_CONTENT]);
+        form.compress().unwrap();
+        let mut walk = Walk::new(u32::MAX);
+        let mut n = 0;
+        while let Some((_c, opened)) = walk.parse_stream(&form) {
+            walk.close(opened);
+            n += 1;
+            assert!(n <= MAX_WALK_BYTES / MAX_CONTENT);
+        }
+        assert_eq!(n, MAX_WALK_BYTES / MAX_CONTENT);
+    }
 
     use lopdf::Dictionary;
 

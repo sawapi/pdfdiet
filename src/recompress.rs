@@ -493,7 +493,7 @@ pub(crate) enum BilevelOutcome {
     /// Replaced with a smaller CCITT G4 stream (new stream size).
     Recompressed { to: usize },
     /// G4 did not shrink it; the original stream is kept.
-    Larger { to: usize },
+    Larger,
     /// A variant this pass does not handle; left untouched.
     Unsupported,
 }
@@ -518,6 +518,12 @@ pub(crate) fn recompress_bilevel(doc: &mut Document, info: &ImageInfo) -> Bileve
         || dict.get(b"DecodeParms").is_ok()
         || info.components != Some(1)
     {
+        return BilevelOutcome::Unsupported;
+    }
+    // The same per-axis bound as every other image path. The changing
+    // elements of one row cost a word per pixel, not a bit, so the packed
+    // size below does not bound them on its own.
+    if !(1..=65_535).contains(&info.width) || !(1..=65_535).contains(&info.height) {
         return BilevelOutcome::Unsupported;
     }
     let filters = filter_names(dict);
@@ -546,9 +552,12 @@ pub(crate) fn recompress_bilevel(doc: &mut Document, info: &ImageInfo) -> Bileve
         return BilevelOutcome::Unsupported;
     }
 
-    let g4 = ccitt::encode_g4(&data, w, h);
+    // Stop as soon as the encoding is no smaller than the original.
+    let Some(g4) = ccitt::encode_g4_within(&data, w, h, info.stream_len) else {
+        return BilevelOutcome::Larger;
+    };
     if g4.len() >= info.stream_len {
-        return BilevelOutcome::Larger { to: g4.len() };
+        return BilevelOutcome::Larger;
     }
 
     let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
@@ -572,6 +581,52 @@ pub(crate) fn recompress_bilevel(doc: &mut Document, info: &ImageInfo) -> Bileve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bilevel_rejects_dimensions_beyond_the_axis_bound() {
+        // Widths up to 2^31 pack into MAX_INFLATE, but the changing
+        // elements of a row take a word per pixel: anything wider than the
+        // 65535 every other image path allows is refused before inflating.
+        let w = 70_000usize;
+        let data = vec![0x55u8; w / 8];
+        let (mut doc, id) = doc_with_image(
+            |d| {
+                d.set("Width", w as i64);
+                d.set("Height", 1i64);
+                d.set("BitsPerComponent", 1i64);
+                d.set("ColorSpace", Object::Name(b"DeviceGray".to_vec()));
+            },
+            &data,
+        );
+        let info = ImageInfo {
+            id,
+            width: w as i64,
+            height: 1,
+            bpc: 1,
+            color: "DeviceGray".into(),
+            components: Some(1),
+            filters: vec![],
+            stream_len: data.len(),
+            extent: None,
+        };
+        assert!(matches!(
+            recompress_bilevel(&mut doc, &info),
+            BilevelOutcome::Unsupported
+        ));
+    }
+
+    #[test]
+    fn g4_encoding_stops_at_the_limit() {
+        // Alternating pixels: G4 is larger than the packed input.
+        let noisy = vec![0x55u8; 64 * 64 / 8];
+        let full = crate::ccitt::encode_g4(&noisy, 64, 64);
+        assert!(full.len() > noisy.len());
+        assert!(crate::ccitt::encode_g4_within(&noisy, 64, 64, noisy.len()).is_none());
+        assert_eq!(
+            crate::ccitt::encode_g4_within(&noisy, 64, 64, usize::MAX),
+            Some(full)
+        );
+    }
 
     use crate::decode::tests::doc_with_image;
     use crate::decode::{decode_image, expand_indices};

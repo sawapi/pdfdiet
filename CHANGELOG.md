@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Hardening against hostile documents, from a source review. Output for
+  ordinary documents is unchanged.
+  - 1-bit images wider or taller than 65535 pixels are left alone, as on
+    every other image path, and CCITT encoding stops as soon as it is no
+    smaller than the original.
+  - Embedded TrueType fonts whose table directory repeats a tag, or whose
+    tables claim more bytes than the font holds, are not rebuilt.
+  - With `subsetOutlines`, a TrueType font whose glyph offsets go
+    backwards is left whole.
+  - Type 1 glyphs over the Type 2 limit of 96 hints are rejected without
+    quadratic work, and glyph ordering is linear.
+  - Content walks count the bytes inflated from forms (1 GiB per walk),
+    not only their parse cost.
+  - Offset checks in the CFF and TrueType readers no longer rely on
+    additions that can wrap in the 32-bit WebAssembly build.
+- Signed documents: usage-rights and certification signatures referenced
+  only from the catalog's `/Perms`, signature dictionaries without `/Type`,
+  and an indirect `/SigFlags` are now recognized, so such documents are
+  refused unless signatures may be broken.
 - npm: `@sawapi/pdfdiet/worker` runs `compress` and `inspect` in a Web
   Worker. `createWorker()` returns the same functions returning promises,
   plus `ready` and `terminate()`; errors arrive as the same classes,

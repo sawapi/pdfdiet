@@ -808,6 +808,34 @@ impl CmapIndex {
     }
 }
 
+/// Most tables a font may list. Real fonts have a few dozen; the directory is
+/// scanned once per table on rebuild.
+const MAX_TABLES: usize = 1024;
+
+/// The directory's tags, in order. None when a tag repeats, the directory is
+/// implausibly long, or the tables claim more bytes than the font holds: a
+/// valid sfnt does none of these, and the rebuilds copy each listed table
+/// once, so their output stays within the input size.
+pub(crate) fn table_tags(font: &[u8]) -> Option<Vec<[u8; 4]>> {
+    let n = be16(font, 4)? as usize;
+    if n > MAX_TABLES {
+        return None;
+    }
+    let mut tags = Vec::with_capacity(n);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut total = 0usize;
+    for i in 0..n {
+        let rec = 12 + i * 16;
+        let tag: [u8; 4] = font.get(rec..rec + 4)?.try_into().ok()?;
+        if !seen.insert(tag) {
+            return None;
+        }
+        total = total.checked_add(be32(font, rec + 12)? as usize)?;
+        tags.push(tag);
+    }
+    (total <= font.len()).then_some(tags)
+}
+
 pub(crate) fn find_table(font: &[u8], tag: &[u8; 4]) -> Option<(usize, usize)> {
     let n = be16(font, 4)? as usize;
     for i in 0..n {
@@ -837,10 +865,10 @@ const DROP_TABLES: &[&[u8; 4]] = &[b"hdmx", b"LTSH", b"VDMX", b"MERG", b"BASE"];
 /// outline (their slot, metrics and id stay). None = the font has a
 /// structure we do not handle.
 fn truncate_truetype(font: &[u8], count: u16, keep: Option<&BTreeSet<u16>>) -> Option<Vec<u8>> {
-    let numtables = be16(font, 4)? as usize;
     if be32(font, 0)? != 0x0001_0000 {
         return None;
     }
+    let numtables = table_tags(font)?.len();
     // Reject fonts with tables we have no policy for (e.g. vertical metrics,
     // which would also need truncating).
     for i in 0..numtables {
@@ -910,6 +938,16 @@ fn truncate_truetype(font: &[u8], count: u16, keep: Option<&BTreeSet<u16>>) -> O
         }
         Some(keep) => {
             // Rebuilt glyph by glyph, long offsets, each glyph 4-aligned.
+            // Offsets must not go backwards: overlapping glyphs would each
+            // be copied in full, growing the table far beyond its size.
+            let mut prev = 0;
+            for i in 0..=count {
+                let v = loca_at(i)?;
+                if v < prev {
+                    return None;
+                }
+                prev = v;
+            }
             out_long = true;
             new_glyf = Vec::new();
             for i in 0..count {
@@ -1129,10 +1167,12 @@ pub(crate) fn add_composite_closure(font: &[u8], gids: &mut BTreeSet<u16>) -> Op
         if start == end {
             continue;
         }
-        if end > glyf_l || start + 10 > end {
+        // Subtraction, not start + 10: offsets come from the font, and on
+        // 32-bit targets (wasm) that sum can wrap past the check.
+        if end > glyf_l || start > end || end - start < 10 {
             return None;
         }
-        let g = &font[glyf_o + start..glyf_o + end];
+        let g = font.get(glyf_o + start..glyf_o + end)?;
         let contours = i16::from_be_bytes([g[0], g[1]]);
         if contours >= 0 {
             continue;
@@ -1338,6 +1378,58 @@ pub(crate) fn subset_truetype_fonts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An sfnt directory listing `tags`, each pointing at `len` bytes at
+    /// the same offset after the directory.
+    fn directory(tags: &[&[u8; 4]], len: u32) -> Vec<u8> {
+        let mut f = vec![0, 1, 0, 0];
+        f.extend_from_slice(&(tags.len() as u16).to_be_bytes());
+        f.extend_from_slice(&[0; 6]);
+        let off = 12 + 16 * tags.len() as u32;
+        for t in tags {
+            f.extend_from_slice(*t);
+            f.extend_from_slice(&[0; 4]);
+            f.extend_from_slice(&off.to_be_bytes());
+            f.extend_from_slice(&len.to_be_bytes());
+        }
+        f.resize(off as usize + len as usize, 0);
+        f
+    }
+
+    #[test]
+    fn table_directory_must_not_repeat_or_overclaim() {
+        assert_eq!(
+            table_tags(&directory(&[b"cvt ", b"kern"], 8)).map(|t| t.len()),
+            Some(2)
+        );
+        // A repeated tag would be copied once per entry on rebuild.
+        assert!(table_tags(&directory(&[b"cvt ", b"cvt "], 8)).is_none());
+        // Distinct tags sharing one region claim more bytes than exist.
+        let shared = directory(&[b"cvt ", b"fpgm", b"prep"], 1000);
+        assert!(table_tags(&shared).is_none());
+    }
+
+    #[test]
+    fn composite_closure_guard_does_not_rely_on_wrapping_addition() {
+        // loca[0] = 0xFFFFFFFF, loca[1] = 9 with glyf at offset 0: on 32-bit
+        // targets start + 10 used to wrap below end and slice backwards.
+        let mut f = directory(&[b"glyf", b"head", b"loca"], 0);
+        let n = 3usize;
+        let set = |f: &mut Vec<u8>, i: usize, off: u32, len: u32| {
+            f[12 + 16 * i + 8..12 + 16 * i + 12].copy_from_slice(&off.to_be_bytes());
+            f[12 + 16 * i + 12..12 + 16 * i + 16].copy_from_slice(&len.to_be_bytes());
+        };
+        let head_at = 12 + 16 * n;
+        let loca_at = head_at + 54;
+        f.resize(loca_at + 8, 0);
+        set(&mut f, 0, 0, 64);
+        set(&mut f, 1, head_at as u32, 54);
+        set(&mut f, 2, loca_at as u32, 8);
+        f[head_at + 50..head_at + 52].copy_from_slice(&1u16.to_be_bytes());
+        f[loca_at..loca_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        f[loca_at + 4..loca_at + 8].copy_from_slice(&9u32.to_be_bytes());
+        assert!(add_composite_closure(&f, &mut BTreeSet::from([0u16])).is_none());
+    }
 
     /// One page drawing text with font F1; returns (doc, catalog, page,
     /// F1 id, spare font id F2).
@@ -1581,6 +1673,18 @@ mod tests {
         assert_eq!(out[g_new..g_new + 12], font[g_old..g_old + 12]);
         // The whole-font checksum invariant holds.
         assert_eq!(table_checksum(&out), 0xB1B0_AFBA);
+    }
+
+    #[test]
+    fn dropping_outlines_refuses_overlapping_glyph_ranges() {
+        // loca[4] = 0: glyph 3 runs backwards (never kept, never checked
+        // before) and glyph 4 spans the whole table, so every kept glyph
+        // laid out like it would copy the table again.
+        let mut font = mini_font();
+        let (lo, _) = find_table(&font, b"loca").unwrap();
+        font[lo + 16..lo + 20].copy_from_slice(&0u32.to_be_bytes());
+        let keep: BTreeSet<u16> = [0, 2, 4].into_iter().collect();
+        assert!(truncate_truetype(&font, 5, Some(&keep)).is_none());
     }
 
     #[test]

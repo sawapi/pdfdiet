@@ -200,15 +200,20 @@ fn read_index(d: &[u8], at: usize) -> Option<Index> {
     if prev != 1 {
         return None;
     }
+    // Every item end is checked, with checked addition: offsets are up to
+    // 32 bits, so on 32-bit targets (wasm) base + offset can wrap.
+    let mut start = base.checked_add(prev)?;
     for i in 1..=count {
         let next = off(i)?;
-        if next < prev {
+        let end = base.checked_add(next)?;
+        if next < prev || end > d.len() {
             return None;
         }
-        items.push((base + prev, base + next));
+        items.push((start, end));
         prev = next;
+        start = end;
     }
-    let end = base + prev;
+    let end = start;
     (end <= d.len()).then_some(Index {
         start: at,
         end,
@@ -410,7 +415,7 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     let [(ts, te)] = top.items.as_slice() else {
         return None;
     };
-    let mut top_dict = parse_dict(&d[*ts..*te])?;
+    let mut top_dict = parse_dict(d.get(*ts..*te)?)?;
     if !top_dict.iter().any(|e| e.op == ROS)
         || top_dict.iter().any(|e| e.op == PRIVATE || e.op == 16)
         || single_int(&top_dict, CHARSTRING_TYPE).is_some_and(|t| t != 2)
@@ -436,7 +441,7 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
     }
     let mut fds = Vec::new();
     for &(s, e) in &fdarray.items {
-        let dict = parse_dict(&d[s..e])?;
+        let dict = parse_dict(d.get(s..e)?)?;
         let p = dict.iter().find(|x| x.op == PRIVATE)?;
         let [size, off] = p.operands.as_slice() else {
             return None;
@@ -553,6 +558,19 @@ fn subset_cid_cff(d: &[u8], cids: &BTreeSet<u16>) -> Option<(Vec<u8>, usize, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn index_offsets_past_the_data_are_refused() {
+        // One item whose end offset is near 2^32: base + offset wraps on
+        // 32-bit targets; every end must be checked, with checked addition.
+        let d = [0, 1, 4, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xEC, 0, 0, 0, 0];
+        assert!(read_index(&d, 0).is_none());
+        // A well-formed one-item INDEX still reads.
+        let ok = [0, 1, 1, 1, 3, b'a', b'b'];
+        let idx = read_index(&ok, 0).unwrap();
+        assert_eq!(idx.items, vec![(5, 7)]);
+        assert_eq!(idx.end, 7);
+    }
 
     /// A minimal CID-keyed CFF: 4 glyphs (CIDs 0, 5, 6, 9), one FD with a
     /// Private DICT and two local subrs.

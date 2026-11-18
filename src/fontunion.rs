@@ -39,7 +39,9 @@ use std::collections::BTreeMap;
 
 #[cfg(test)]
 use crate::subset::CmapIndex;
-use crate::subset::{add_composite_closure, assemble_font, be16, be32, find_table, outlined_gids};
+use crate::subset::{
+    add_composite_closure, assemble_font, be16, be32, find_table, outlined_gids, table_tags,
+};
 use crate::{MAX_INFLATE, MAX_PASS_BYTES, inflate, resolve, resolve_dict};
 
 /// More subsets of one font than any real document carries (the corpus
@@ -567,10 +569,7 @@ fn parse(font: &[u8], count: usize) -> Option<Parsed<'_>> {
 }
 
 fn tags(font: &[u8]) -> Option<Vec<[u8; 4]>> {
-    let n = be16(font, 4)? as usize;
-    (0..n)
-        .map(|i| font.get(12 + i * 16..16 + i * 16)?.try_into().ok())
-        .collect()
+    table_tags(font)
 }
 
 fn table<'a>(font: &'a [u8], tag: &[u8; 4]) -> Option<&'a [u8]> {

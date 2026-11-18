@@ -386,7 +386,15 @@ fn code_line(w: &mut BitWriter, cur: &[usize], reference: &[usize], width: usize
 /// Encode packed 1-bit rows (bit 1 = white, rows byte-aligned, MSB first) as
 /// a CCITT G4 stream, terminated by EOFB. `data` must hold at least
 /// `height` rows of `ceil(width / 8)` bytes.
+#[cfg(test)]
 pub fn encode_g4(data: &[u8], width: usize, height: usize) -> Vec<u8> {
+    encode_g4_within(data, width, height, usize::MAX).unwrap()
+}
+
+/// [`encode_g4`], giving up (`None`) once the output reaches `limit` bytes:
+/// the encoding can be several times larger than the packed input for noisy
+/// rows, and a result that is not smaller is discarded anyway.
+pub fn encode_g4_within(data: &[u8], width: usize, height: usize, limit: usize) -> Option<Vec<u8>> {
     // Real assert: this precondition guards every row slice below, and the
     // callers validate it — release builds must not skip the check.
     assert!(width > 0 && data.len() >= width.div_ceil(8) * height);
@@ -397,11 +405,14 @@ pub fn encode_g4(data: &[u8], width: usize, height: usize) -> Vec<u8> {
         let cur = changing_elements(&data[row * stride..(row + 1) * stride], width);
         code_line(&mut w, &cur, &reference, width);
         reference = cur;
+        if w.out.len() >= limit {
+            return None;
+        }
     }
     // EOFB: two end-of-line codes.
     w.put(0b000000000001, 12);
     w.put(0b000000000001, 12);
-    w.finish()
+    Some(w.finish())
 }
 
 #[cfg(test)]

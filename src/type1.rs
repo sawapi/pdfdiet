@@ -742,6 +742,11 @@ fn emit_type2(glyph: &Glyph, default_width: f64, nominal_width: f64) -> Option<V
                     .any(|&(p, e)| stem_key(p, e) == stem_key(*pos, *ext))
                 {
                     list.push((*pos, *ext));
+                    // Over the Type 2 limit the glyph is refused below;
+                    // stopping here keeps the scans above short.
+                    if h.len() + v.len() > 96 {
+                        return None;
+                    }
                 }
                 groups.last_mut().unwrap().push(stem_key(*pos, *ext));
             }
@@ -1076,8 +1081,12 @@ pub(crate) fn type1_to_cff(data: &[u8]) -> Option<Vec<u8>> {
         encoded.sort();
         order.extend(encoded.iter().map(|&(_c, i)| i));
     }
+    let mut placed = vec![false; glyphs.len()];
+    for &i in &order {
+        placed[i] = true;
+    }
     for i in 0..glyphs.len() {
-        if !order.contains(&i) {
+        if !placed[i] {
             order.push(i);
         }
     }
@@ -1409,6 +1418,21 @@ mod tests {
         assert!(super::interpret(&cs, &subrs, &mut steps).is_none());
         assert_eq!(steps, 0);
         assert!(t.elapsed().as_secs() < 5);
+    }
+
+    #[test]
+    fn glyphs_over_the_stem_limit_are_refused_without_quadratic_work() {
+        // 200k distinct stems fit the step budget; deduplicating them all
+        // before applying the Type 2 limit of 96 took ~2e10 comparisons.
+        let glyph = Glyph {
+            width: 500.0,
+            ops: (0..200_000)
+                .map(|i| GOp::Stem(true, i as f64, 10.0))
+                .collect(),
+        };
+        let t = std::time::Instant::now();
+        assert!(emit_type2(&glyph, 500.0, 0.0).is_none());
+        assert!(t.elapsed().as_secs() < 2);
     }
 
     #[test]
