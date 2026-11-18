@@ -25,7 +25,9 @@ export interface WorkerOptions {
 function wasmSource(wasm: unknown): { value: unknown } | undefined {
   if (wasm === undefined) return { value: undefined };
   if (typeof wasm === "string" || (typeof URL !== "undefined" && wasm instanceof URL)) {
-    const base = (globalThis as { location?: { href: string } }).location?.href;
+    // As init() would: against the document's base URL where there is one.
+    const g = globalThis as { document?: { baseURI?: string }; location?: { href: string } };
+    const base = g.document?.baseURI ?? g.location?.href;
     try {
       return { value: new URL(wasm, base).href };
     } catch {
@@ -63,7 +65,11 @@ export function createWorker(options?: WorkerOptions): WorkerApi {
   if (options !== undefined && (typeof options !== "object" || options === null || Array.isArray(options))) {
     problem = new TypeError("pdfdiet: options must be an object");
   } else {
-    source = wasmSource(options?.wasm);
+    try {
+      source = wasmSource(options?.wasm);
+    } catch (e) {
+      return failed(e instanceof Error ? e : new TypeError("pdfdiet: invalid options")); // a throwing getter
+    }
     if (!source) {
       problem = new TypeError(
         "pdfdiet: wasm must be a URL, an ArrayBuffer, a Uint8Array or a WebAssembly.Module",
@@ -80,7 +86,9 @@ export function createWorker(options?: WorkerOptions): WorkerApi {
     // another one (a CDN), start a same-origin worker that imports it;
     // module imports may cross origins (with CORS).
     try {
-      const script = new URL("./worker-main.mjs", import.meta.url).href;
+      // Not a literal: bundlers would copy the unbundled file as an asset.
+      const name = "./worker-main.mjs";
+      const script = new URL(name, import.meta.url).href;
       const blob = new Blob([`import ${JSON.stringify(script)};`], { type: "text/javascript" });
       const url = URL.createObjectURL(blob);
       try {

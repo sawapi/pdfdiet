@@ -113,8 +113,10 @@ function transferables(value: unknown): ArrayBuffer[] {
  * own: structured cloning copies the whole underlying buffer otherwise.
  */
 export function compact(v: unknown): unknown {
+  // The constructor, not slice(): a Node Buffer's slice() (and a
+  // subclass's) shares the memory instead of copying it.
   return v instanceof Uint8Array && (v.byteOffset !== 0 || v.byteLength !== v.buffer.byteLength)
-    ? v.slice()
+    ? new Uint8Array(v)
     : v;
 }
 
@@ -134,7 +136,7 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
       ready.then(
         () => port.postMessage({ type: "ready" } satisfies WorkerMessage, []),
         (e: unknown) => port.postMessage({ type: "failed", error: toWire(e) } satisfies WorkerMessage, []),
-      );
+      ).catch(() => {});
       return;
     }
     if (msg.type !== "call") return;
@@ -227,7 +229,9 @@ export function connect(
       try {
         // A compacted copy is ours: move it rather than copy it again.
         const sent = args.map(compact);
-        const moved = sent.filter((a, i) => a !== args[i]).map((a) => (a as Uint8Array).buffer as ArrayBuffer);
+        const moved = sent
+          .filter((a, i) => a !== args[i] && (a as Uint8Array).buffer !== (args[i] as Uint8Array).buffer)
+          .map((a) => (a as Uint8Array).buffer as ArrayBuffer);
         port.postMessage({ type: "call", id, fn, args: sent } satisfies ClientMessage, moved);
       } catch (e) {
         reject(sendError(e));

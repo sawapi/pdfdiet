@@ -129,8 +129,33 @@ export async function testWorker(web, input) {
     assert.equal(sent[2].args[0], big, "a whole buffer is sent as is");
     assert.deepEqual(moved.map((t) => t.length), [0, 1, 0], "only the compacted copy is transferred");
     assert.equal(big.byteLength, 1 << 20, "the caller's buffer is not detached");
+    for (const call of calls) call.catch(() => {});
     c.api.terminate();
     for (const call of calls) await assert.rejects(call, /worker terminated/);
+  }
+
+  // Node Buffers, whose slice() shares memory: a pooled one and a
+  // subarray are sent as real copies, over a real channel, and the
+  // caller's memory stays attached.
+  {
+    const w = pair();
+    const pooled = Buffer.from([1, 2, 3]);
+    assert.ok(pooled.byteLength < pooled.buffer.byteLength, "a pooled Buffer");
+    await assert.rejects(w.api.inspect(pooled), (e) => e.reason === "invalid-pdf");
+    assert.deepEqual([...pooled], [1, 2, 3]);
+    const host = Buffer.concat([Buffer.alloc(100), input, Buffer.alloc(100)]);
+    const view = host.subarray(100, 100 + input.length);
+    assert.equal((await w.api.inspect(view)).length, 1);
+    assert.equal(host.byteLength, input.length + 200, "not detached");
+    class Odd extends Uint8Array {
+      slice() {
+        return this; // a subclass whose slice() does not copy
+      }
+    }
+    const odd = new Odd(host.buffer, host.byteOffset + 100, input.length);
+    assert.equal((await w.api.inspect(odd)).length, 1);
+    assert.equal(host.byteLength, input.length + 200);
+    w.api.terminate();
   }
 
   // The entry point itself: Node has no Web Workers.
