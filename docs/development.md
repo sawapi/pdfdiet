@@ -26,7 +26,7 @@ The library builds without the command line tool's dependencies with
 ```sh
 cd npm && npm ci && cd ..   # once: the TypeScript compiler
 ./build-npm.sh              # wasm for Node (npm/node) and browsers (npm/web), then npm/dist
-cd npm && npm test          # smoke tests, init forms, type tests
+cd npm && npm test          # smoke tests, worker protocol, init forms, type tests
 ```
 
 `build-npm.sh` needs the `wasm-bindgen` CLI at the version in
@@ -37,7 +37,7 @@ installed. The typed API is in `npm/src/*.mts`; the wasm-bindgen output in
 ## Website
 
 The landing page in `web/` doubles as the browser version: it compresses
-in a Web Worker through the package's browser build.
+in a Web Worker through the package's worker entry point.
 
 ```sh
 ./build-site.sh                      # builds the npm package, then the site into web/dist

@@ -54,7 +54,15 @@ const res = compress(new Uint8Array(await file.arrayBuffer()));
 const blob = new Blob([res.output], { type: "application/pdf" });
 ```
 
-Compression is synchronous; for large files, run it in a Web Worker.
+Compression is synchronous. To keep the page responsive, run it in a Web
+Worker that the package starts for you:
+
+```js
+import { createWorker } from "@sawapi/pdfdiet/worker";
+
+const pdfdiet = createWorker(); // loads the wasm by itself
+const res = await pdfdiet.compress(new Uint8Array(await file.arrayBuffer()));
+```
 
 ## Features
 
@@ -73,6 +81,7 @@ Compression is synchronous; for large files, run it in a Web Worker.
 | `compress(pdf, { dpi, quality, subsetOutlines, stripJpegMetadata, stripProtection, breakSignatures })` | `{ output, log, imagesTotal, imagesRecompressed }` |
 | `inspect(pdf)` | One entry per image: size, color space, filters, bytes, drawn size, `dpi` |
 | `init(wasm?)`, `initSync(bytes)` | Load the browser build (no-ops in Node) |
+| `createWorker({ wasm? })` (from `/worker`) | `compress` and `inspect` returning promises, run in a Web Worker; `ready`, `terminate()` |
 
 Documents that are not processed throw a `PdfdietError` whose `reason` is
 `"invalid-pdf"`, `"encrypted"`, `"protected"`, `"signed"` or `"empty"`.

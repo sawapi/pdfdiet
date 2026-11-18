@@ -12,10 +12,10 @@ fi
 
 rm -rf web/dist
 mkdir -p web/dist/pkg/dist web/dist/pkg/web
-cp web/index.html web/style.css web/app.js web/worker.js web/favicon.svg web/dist/
-# The page uses the npm package's browser entry point, laid out as in the
+cp web/index.html web/style.css web/app.js web/favicon.svg web/dist/
+# The page uses the npm package's worker entry point, laid out as in the
 # package so its relative imports resolve.
-cp npm/dist/web.mjs npm/dist/core.mjs web/dist/pkg/dist/
+cp npm/dist/worker.mjs npm/dist/worker-main.mjs npm/dist/protocol.mjs npm/dist/web.mjs npm/dist/core.mjs web/dist/pkg/dist/
 cp npm/web/pdfdiet_wasm.js npm/web/pdfdiet_wasm_bg.wasm web/dist/pkg/web/
 ls -lhR web/dist
 echo "OK: site ready in web/dist"

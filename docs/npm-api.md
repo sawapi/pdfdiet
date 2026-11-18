@@ -9,8 +9,9 @@ function's documentation shows up in editors.
 |---|---|
 | `"@sawapi/pdfdiet"` | Node, and browsers through a bundler (resolves to the browser build there) |
 | `"@sawapi/pdfdiet/web"` | Browsers and bundlers, explicitly |
+| `"@sawapi/pdfdiet/worker"` | Browsers and bundlers: the same functions run in a Web Worker ([below](#in-a-web-worker)) |
 
-Both export the same functions. The browser build has to load its `.wasm`
+The first two export the same functions. The browser build has to load its `.wasm`
 file before use:
 
 ```js
@@ -131,9 +132,52 @@ try {
 `TypeError` and `RangeError` messages start with `pdfdiet: `.
 `PdfdietError` messages do not; its class tells where it came from.
 
-## In a web page
+## In a Web Worker
 
 Compression is synchronous and can take a few seconds on a large file, so
-in a page run it in a Web Worker. The [website](https://sawapi.github.io/pdfdiet/)
-does this; its worker is
-[`web/worker.js`](https://github.com/sawapi/pdfdiet/blob/main/web/worker.js).
+in a page, run it off the main thread. `createWorker` starts a Web Worker
+that loads the wasm by itself, and returns `compress` and `inspect` as
+functions taking the same arguments and returning promises:
+
+```js
+import { createWorker, PdfdietError } from "@sawapi/pdfdiet/worker";
+
+const pdfdiet = createWorker();
+try {
+  const res = await pdfdiet.compress(new Uint8Array(await file.arrayBuffer()), { dpi: 150 });
+  const blob = new Blob([res.output], { type: "application/pdf" });
+} catch (e) {
+  if (e instanceof PdfdietError) console.log(e.reason);
+}
+pdfdiet.terminate(); // when done
+```
+
+- Arguments are copied to the worker, so your buffers stay usable. The
+  `output` of `compress` is moved back without a copy.
+- Calls on one worker run one at a time, in order. Create several workers
+  to run in parallel.
+- Errors reject the promise with the same class and message the function
+  throws: `PdfdietError` with its `reason`, `TypeError`, `RangeError`. An
+  argument that cannot be sent to a worker (such as a function) is a
+  `TypeError`.
+- `ready` settles once the wasm has loaded, and rejects if the worker
+  could not start or load it; every call then rejects with that error.
+  Calls wait for it themselves, so awaiting it is optional.
+- `terminate()` stops the worker at once, which is also the way to cancel
+  a call: calls still running or waiting, and any made later, reject with
+  `Error("pdfdiet: worker terminated")`. There is no progress reporting.
+- `createWorker({ wasm })` loads the `.wasm` from elsewhere: a URL (string
+  or `URL`; a relative one resolves against the page), an `ArrayBuffer` or
+  `Uint8Array`, or a `WebAssembly.Module`. Unlike `init`, it cannot take a
+  `Response` or a promise, which cannot be sent to a worker; anything else
+  makes `ready` and every call reject with a `TypeError`.
+- Bundlers that understand `new Worker(new URL(..., import.meta.url))`
+  (Vite, webpack 5 and others) bundle the worker script.
+- `createWorker` throws a `TypeError` where Web Workers are not available,
+  such as in Node.
+- A call that fails inside the wasm with something other than the errors
+  above (running out of memory on a very large file, for example) may
+  leave the worker unusable: terminate it and create a new one.
+
+The [website](https://sawapi.github.io/pdfdiet/) works this way; see
+[`web/app.js`](https://github.com/sawapi/pdfdiet/blob/main/web/app.js).

@@ -5,6 +5,7 @@
 import initDefault, { compress, inspect, init, initSync, PdfdietError } from "@sawapi/pdfdiet";
 import type { CompressOptions, CompressResult, FailureReason, ImageInfo } from "@sawapi/pdfdiet";
 import * as web from "@sawapi/pdfdiet/web";
+import { createWorker, PdfdietError as WorkerError, type WorkerApi } from "@sawapi/pdfdiet/worker";
 
 declare const bytes: Uint8Array;
 
@@ -60,6 +61,21 @@ web.initSync({ module: new Uint8Array(0) });
 web.compress(bytes, { stripJpegMetadata: true });
 const webError: typeof PdfdietError = web.PdfdietError;
 
+// The worker API: same arguments, promised results.
+const w: WorkerApi = createWorker({ wasm: "https://example.com/pdfdiet_wasm_bg.wasm" });
+createWorker();
+await w.ready;
+const wres: CompressResult = await w.compress(bytes, { dpi: 150 });
+const wimages: ImageInfo[] = await w.inspect(bytes);
+w.terminate();
+const sameError: typeof PdfdietError = WorkerError;
+// @ts-expect-error: results are promises
+const notSync: CompressResult = w.compress(bytes);
+// @ts-expect-error: options are checked as for compress
+w.compress(bytes, { dpiTarget: 150 });
+// @ts-expect-error: the worker loads the wasm itself
+w.init();
+
 // @ts-expect-error: options are an object, not positional arguments
 compress(bytes, 150, 80);
 // @ts-expect-error: unknown option
@@ -75,4 +91,4 @@ const bad: FailureReason = "corrupt";
 // @ts-expect-error: the bindings are not part of the API
 import { compress_pdf } from "@sawapi/pdfdiet";
 
-void [output, lines, counts, webError, bad, compress_pdf];
+void [output, lines, counts, webError, bad, compress_pdf, wres, wimages, sameError, notSync];

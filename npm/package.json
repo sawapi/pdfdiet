@@ -23,6 +23,10 @@
       "types": "./dist/web.d.mts",
       "default": "./dist/web.mjs"
     },
+    "./worker": {
+      "types": "./dist/worker.d.mts",
+      "default": "./dist/worker.mjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -59,13 +63,15 @@
   },
   "author": "sawapi",
   "scripts": {
-    "prepack": "node -e \"for (const f of ['dist/core.mjs','dist/core.d.mts','dist/node.mjs','dist/node.d.mts','dist/web.mjs','dist/web.d.mts','node/pdfdiet_wasm_bg.wasm','web/pdfdiet_wasm_bg.wasm']) require('fs').accessSync(f)\" || (cd .. && ./build-npm.sh)",
+    "prepack": "node -e \"for (const f of ['dist/core.mjs','dist/core.d.mts','dist/node.mjs','dist/node.d.mts','dist/web.mjs','dist/web.d.mts','dist/worker.mjs','dist/worker.d.mts','dist/worker-main.mjs','dist/protocol.mjs','node/pdfdiet_wasm_bg.wasm','web/pdfdiet_wasm_bg.wasm']) require('fs').accessSync(f)\" || (cd .. && ./build-npm.sh)",
     "test": "node test.mjs && tsc -p test-types.tsconfig.json && tsc -p test-types-node.tsconfig.json && tsc -p test-types-bundler.tsconfig.json"
   },
   "publishConfig": {
     "access": "public"
   },
-  "sideEffects": false,
+  "sideEffects": [
+    "./dist/worker-main.mjs"
+  ],
   "devDependencies": {
     "typescript": "7.0.2"
   }
