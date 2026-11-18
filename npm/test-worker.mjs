@@ -106,6 +106,24 @@ export async function testWorker(web, input) {
     w.api.terminate();
   }
 
+  // After a WebAssembly trap the worker stops: that call rejects with the
+  // trap, and every later call with the reason.
+  {
+    let calls = 0;
+    const w = pair({
+      compress: () => {
+        calls++;
+        throw new WebAssembly.RuntimeError("unreachable");
+      },
+      inspect: web.inspect,
+    });
+    await assert.rejects(w.api.compress(input), (e) => e.name === "RuntimeError" && e.message === "unreachable");
+    await assert.rejects(w.api.inspect(input), /^Error: pdfdiet: the worker stopped after a WebAssembly error \(unreachable\); create a new one$/);
+    await assert.rejects(w.api.ready.then(() => w.api.compress(input)), /worker stopped/);
+    assert.equal(calls, 1);
+    w.api.terminate();
+  }
+
   // A message the worker cannot read fails everything, not just one call.
   {
     const sent = [];

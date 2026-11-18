@@ -33,6 +33,12 @@ const hints = {
   signed: " — pass --break-signatures to do that explicitly",
 };
 
+// Text for the terminal with control characters (other than newline and
+// tab) escaped: names in the log and the table come from the document, and
+// a PDF name can hold any byte, including escape sequences.
+const printable = (s) =>
+  String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u{${c.charCodeAt(0).toString(16)}}`);
+
 // Report a refused or unreadable document, or a file that cannot be read or
 // written, as a one-line error rather than a stack trace.
 function run(f) {
@@ -40,10 +46,10 @@ function run(f) {
     return f();
   } catch (e) {
     if (e instanceof PdfdietError) {
-      console.error(`pdfdiet: ${e.message}${hints[e.reason] ?? ""}`);
+      console.error(`pdfdiet: ${printable(e.message)}${hints[e.reason] ?? ""}`);
     } else if (typeof e?.reason === "string" && typeof e.free === "function") {
       // inspect_table comes straight from the bindings and throws their Failure.
-      console.error(`pdfdiet: ${e.message}`);
+      console.error(`pdfdiet: ${printable(e.message)}`);
       e.free();
     } else if (typeof e?.code === "string" && typeof e.syscall === "string") {
       console.error(`pdfdiet: ${e.message}`); // a file system error
@@ -61,7 +67,7 @@ if (cmd === "inspect") {
   const input = args[0];
   if (!input) usage(1);
   const data = run(() => readFileSync(input));
-  run(() => console.log(inspect_table(data)));
+  run(() => console.log(printable(inspect_table(data))));
 } else if (cmd === "compress") {
   let input = null;
   let output = null;
@@ -98,7 +104,7 @@ if (cmd === "inspect") {
     compress(data, { dpi, quality, subsetOutlines, stripJpegMetadata, stripProtection, breakSignatures }),
   );
   run(() => writeFileSync(output, res.output));
-  for (const line of res.log) console.log(line);
+  for (const line of res.log) console.log(printable(line));
   console.log(`\n${res.imagesRecompressed}/${res.imagesTotal} images recompressed`);
   const outLen = statSync(output).size;
   console.log(

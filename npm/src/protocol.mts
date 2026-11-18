@@ -127,6 +127,7 @@ export function compact(v: unknown): unknown {
 export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<void>): void {
   let ready: Promise<void> | undefined;
   let queue = Promise.resolve();
+  let stopped: WireError | undefined;
   port.onmessage = ({ data }) => {
     const msg = data as ClientMessage;
     if (msg.type === "init") {
@@ -143,6 +144,7 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
     const { id, fn, args } = msg;
     const job = async () => {
       try {
+        if (stopped) throw fromWire(stopped);
         if (!ready) throw new Error("pdfdiet: the worker was not initialized");
         await ready;
         if (!(names as readonly string[]).includes(fn)) throw new TypeError(`pdfdiet: no function ${fn}`);
@@ -150,6 +152,15 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
         port.postMessage({ type: "result", id, value } satisfies WorkerMessage, transferables(value));
       } catch (e) {
         port.postMessage({ type: "error", id, error: toWire(e) } satisfies WorkerMessage, []);
+        // A trap (a Rust panic, or running out of memory) can leave the
+        // module's state inconsistent: stop serving rather than reuse it.
+        if (!stopped && typeof WebAssembly !== "undefined" && e instanceof WebAssembly.RuntimeError) {
+          stopped = {
+            name: "Error",
+            message: `pdfdiet: the worker stopped after a WebAssembly error (${toWire(e).message}); create a new one`,
+          };
+          port.postMessage({ type: "failed", error: stopped } satisfies WorkerMessage, []);
+        }
       }
     };
     // Whatever happens to one call, the next still runs.

@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <!-- Everything comes from this origin; the inline theme script below is
+       allowed by its hash (update it if the script changes). The worker
+       may be a blob: module when the package is served cross-origin. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-v6PB8euj6Cxr3zVsszmB741h3Iwpbp1ps4b02sfBYDw='; style-src 'self'; img-src 'self' blob: data:; worker-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>pdfdiet — shrink PDFs in your browser</title>
   <meta name="description" content="Shrink PDFs by resampling each image to the resolution it is actually shown at and optimizing fonts losslessly. Runs entirely in your browser: your file never leaves your device. Free and open source.">
@@ -105,7 +109,7 @@
           </div>
         </div>
 
-        <form class="settings" id="settings" onsubmit="return false">
+        <form class="settings" id="settings">
           <div class="field">
             <label for="dpi">Image resolution <output id="dpiOut" for="dpi">150 dpi</output></label>
             <input type="range" id="dpi" min="72" max="300" step="1" value="150" list="dpiMarks">
@@ -255,7 +259,7 @@ const blob = new Blob([res.output], { type: "application/pdf" });</code></pre>
     </div>
   </footer>
 
-  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <svg class="sprites" width="0" height="0" aria-hidden="true">
     <symbol id="mark" viewBox="0 0 32 32">
       <path d="M8 3h11l7 7v17a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" fill="var(--accent)"/>
       <path d="M19 3v5a2 2 0 0 0 2 2h5" fill="var(--accent-deep)"/>

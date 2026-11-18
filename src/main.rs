@@ -86,7 +86,7 @@ fn main() {
             }
             _ => "",
         };
-        eprintln!("error: {e}{hint}");
+        eprintln!("error: {}{hint}", printable(&e.to_string()));
         std::process::exit(1);
     }
 }
@@ -100,9 +100,24 @@ fn positive_dpi(s: &str) -> Result<f64, String> {
 
 type AnyError = Box<dyn std::error::Error>;
 
+/// Text for the terminal with control characters (other than newline and
+/// tab) escaped: names in the log and the table come from the document,
+/// and a PDF name can hold any byte, including escape sequences.
+fn printable(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            out.extend(c.escape_unicode());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn inspect(input: &PathBuf) -> Result<(), AnyError> {
     let images = inspect_bytes(&std::fs::read(input)?)?;
-    println!("{}", format_inspect_table(&images));
+    println!("{}", printable(&format_inspect_table(&images)));
     Ok(())
 }
 
@@ -128,7 +143,7 @@ fn compress(
     std::fs::write(output, pdf)?;
 
     for line in &stats.log {
-        println!("{line}");
+        println!("{}", printable(line));
     }
     println!(
         "\n{}/{} images recompressed, {} font subsets merged, {} fonts subsetted, {} fonts converted to CFF, {} bytes saved in streams",
@@ -148,4 +163,15 @@ fn compress(
         out_size as f64 / in_size as f64 * 100.0
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn printable_escapes_terminal_controls() {
+        assert_eq!(
+            super::printable("a\u{1b}[2Jb\nc\td\u{9b}"),
+            "a\\u{1b}[2Jb\nc\td\\u{9b}"
+        );
+    }
 }

@@ -17,6 +17,14 @@
     not only their parse cost.
   - Offset checks in the CFF and TrueType readers no longer rely on
     additions that can wrap in the 32-bit WebAssembly build.
+- Both command-line tools escape control characters in what they print
+  (names in the log and the image table come from the document), so a
+  crafted PDF cannot send escape sequences to the terminal.
+- npm worker: after a WebAssembly error (a trap, such as running out of
+  memory) the worker stops and rejects later calls, instead of reusing a
+  module that may be in an inconsistent state.
+- Website: a Content-Security-Policy limits the page to its own scripts,
+  styles and workers.
 - Signed documents: usage-rights and certification signatures referenced
   only from the catalog's `/Perms`, signature dictionaries without `/Type`,
   and an indirect `/SigFlags` are now recognized, so such documents are
