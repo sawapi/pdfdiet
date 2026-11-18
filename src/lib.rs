@@ -422,10 +422,10 @@ pub(crate) fn compress_document(
                     stats.stream_bytes_saved += info.stream_len as i64 - to as i64;
                     stats.images_recompressed += 1;
                 }
-                BilevelOutcome::Larger { to } => {
+                BilevelOutcome::Larger => {
                     stats.log.push(format!(
-                        "keep obj {} {}: G4 {} >= original {}",
-                        info.id.0, info.id.1, to, info.stream_len
+                        "keep obj {} {}: G4 >= original {}",
+                        info.id.0, info.id.1, info.stream_len
                     ));
                 }
                 BilevelOutcome::Unsupported => {
@@ -762,11 +762,26 @@ fn check_document(doc: &Document, opts: &CompressOptions) -> Result<(), Refusal>
 /// Whether the document carries digital signatures (which any rewrite would
 /// invalidate — their ByteRange refers to the original bytes).
 fn document_is_signed(doc: &Document) -> bool {
-    if let Ok(catalog) = doc.catalog()
-        && let Ok(acro) = catalog.get(b"AcroForm").and_then(|o| resolve_dict(doc, o))
-        && dict_int(acro, b"SigFlags").unwrap_or(0) != 0
-    {
-        return true;
+    if let Ok(catalog) = doc.catalog() {
+        if let Ok(acro) = catalog.get(b"AcroForm").and_then(|o| resolve_dict(doc, o))
+            && acro
+                .get(b"SigFlags")
+                .ok()
+                .and_then(|o| resolve(doc, o).ok())
+                .and_then(|o| o.as_i64().ok())
+                .unwrap_or(0)
+                != 0
+        {
+            return true;
+        }
+        // Usage-rights (UR3) and certification (DocMDP) signatures hang
+        // off the catalog's /Perms, with no form field and possibly no
+        // /Type on the signature dictionary.
+        if let Ok(perms) = catalog.get(b"Perms").and_then(|o| resolve_dict(doc, o))
+            && !perms.is_empty()
+        {
+            return true;
+        }
     }
     doc.objects.values().any(|obj| {
         let dict = match obj {
@@ -776,6 +791,8 @@ fn document_is_signed(doc: &Document) -> bool {
         };
         matches!(dict.get(b"Type"), Ok(Object::Name(n)) if n == b"Sig")
             || matches!(dict.get(b"FT"), Ok(Object::Name(n)) if n == b"Sig")
+            // A signature dictionary's own keys, /Type being optional.
+            || (dict.has(b"ByteRange") && dict.has(b"Contents") && dict.has(b"Filter"))
     })
 }
 
@@ -865,5 +882,52 @@ pub(crate) fn resolve_dict<'a>(
             expected: "Dictionary",
             found: "other",
         }),
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    fn doc_with_catalog(build: impl FnOnce(&mut Document, &mut Dictionary)) -> Document {
+        let mut doc = Document::with_version("1.7");
+        let mut catalog = Dictionary::new();
+        catalog.set("Type", Object::Name(b"Catalog".to_vec()));
+        build(&mut doc, &mut catalog);
+        let id = doc.add_object(catalog);
+        doc.trailer.set("Root", Object::Reference(id));
+        doc
+    }
+
+    #[test]
+    fn usage_rights_without_a_field_or_type_count_as_signed() {
+        // A UR3 signature: referenced from /Perms only, no /Type key.
+        let doc = doc_with_catalog(|doc, catalog| {
+            let mut sig = Dictionary::new();
+            sig.set("Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
+            sig.set(
+                "ByteRange",
+                Object::Array(vec![0.into(), 10.into(), 20.into(), 10.into()]),
+            );
+            sig.set("Contents", Object::string_literal(vec![0u8; 8]));
+            let sig = doc.add_object(sig);
+            let mut perms = Dictionary::new();
+            perms.set("UR3", Object::Reference(sig));
+            catalog.set("Perms", perms);
+        });
+        assert!(document_is_signed(&doc));
+    }
+
+    #[test]
+    fn indirect_sigflags_count_as_signed() {
+        let doc = doc_with_catalog(|doc, catalog| {
+            let flags = doc.add_object(Object::Integer(3));
+            let mut acro = Dictionary::new();
+            acro.set("Fields", Object::Array(vec![]));
+            acro.set("SigFlags", Object::Reference(flags));
+            catalog.set("AcroForm", acro);
+        });
+        assert!(document_is_signed(&doc));
+        assert!(!document_is_signed(&doc_with_catalog(|_, _| {})));
     }
 }
