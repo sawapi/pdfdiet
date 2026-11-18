@@ -62,9 +62,13 @@ type WorkerMessage =
 // Errors are sent as plain data and rebuilt on the other side, which is
 // the same in every browser (structured cloning of errors is not).
 function toWire(e: unknown): WireError {
-  if (e instanceof PdfdietError) return { name: e.name, message: e.message, reason: e.reason };
-  if (e instanceof Error) return { name: e.name, message: e.message };
-  return { name: "Error", message: String(e) };
+  try {
+    if (e instanceof PdfdietError) return { name: e.name, message: e.message, reason: e.reason };
+    if (e instanceof Error) return { name: String(e.name), message: String(e.message) };
+    return { name: "Error", message: String(e) };
+  } catch {
+    return { name: "Error", message: "pdfdiet: unknown error" }; // String() itself threw
+  }
 }
 
 function fromWire(w: WireError): Error {
@@ -104,6 +108,16 @@ function transferables(value: unknown): ArrayBuffer[] {
 }
 
 /**
+ * A Uint8Array that is a view into part of a larger buffer, copied to its
+ * own: structured cloning copies the whole underlying buffer otherwise.
+ */
+export function compact(v: unknown): unknown {
+  return v instanceof Uint8Array && (v.byteOffset !== 0 || v.byteLength !== v.buffer.byteLength)
+    ? v.slice()
+    : v;
+}
+
+/**
  * Worker side: wait for the init message, load the wasm with `init`, then
  * answer calls one at a time, in the order they arrive.
  */
@@ -124,7 +138,7 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
     }
     if (msg.type !== "call") return;
     const { id, fn, args } = msg;
-    queue = queue.then(async () => {
+    const job = async () => {
       try {
         if (!ready) throw new Error("pdfdiet: the worker was not initialized");
         await ready;
@@ -134,7 +148,14 @@ export function serve(port: Port, api: Api, init: (wasm: unknown) => Promise<voi
       } catch (e) {
         port.postMessage({ type: "error", id, error: toWire(e) } satisfies WorkerMessage, []);
       }
-    });
+    };
+    // Whatever happens to one call, the next still runs.
+    queue = queue.then(job).catch(() => {});
+  };
+  // A message that cannot be read has no id to answer: fail everything.
+  port.onmessageerror = () => {
+    const error = { name: "Error", message: "pdfdiet: a message to the worker could not be read" };
+    port.postMessage({ type: "failed", error } satisfies WorkerMessage, []);
   };
 }
 
@@ -203,7 +224,7 @@ export function connect(
     return new Promise((resolve, reject) => {
       const id = ++nextId;
       try {
-        port.postMessage({ type: "call", id, fn, args } satisfies ClientMessage, []);
+        port.postMessage({ type: "call", id, fn, args: args.map(compact) } satisfies ClientMessage, []);
       } catch (e) {
         reject(sendError(e));
         return;

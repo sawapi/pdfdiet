@@ -1,7 +1,7 @@
 // Worker entry point (browsers and bundlers): the same functions as the
 // browser build, run in a Web Worker so the page stays responsive.
 
-import { connect, type Port, type WorkerApi } from "./protocol.mjs";
+import { compact, connect, type Port, type WorkerApi } from "./protocol.mjs";
 
 export type { CompressOptions, CompressResult, FailureReason, ImageInfo } from "./core.mjs";
 export { PdfdietError } from "./core.mjs";
@@ -37,7 +37,7 @@ function wasmSource(wasm: unknown): { value: unknown } | undefined {
     wasm instanceof Uint8Array ||
     (typeof WebAssembly !== "undefined" && wasm instanceof WebAssembly.Module)
   ) {
-    return { value: wasm };
+    return { value: compact(wasm) };
   }
   return undefined;
 }
@@ -70,19 +70,41 @@ export function createWorker(options?: WorkerOptions): WorkerApi {
       );
     }
   }
-  if (problem || !source) {
-    // No worker to start: a client whose every call rejects with the reason.
-    const none: Port = { postMessage() {}, onmessage: null, onmessageerror: null };
-    const c = connect(none, undefined, () => {});
-    c.fail(problem ?? new TypeError("pdfdiet: invalid options"));
-    return c.api;
+  if (problem || !source) return failed(problem ?? new TypeError("pdfdiet: invalid options"));
+  let worker: Worker;
+  try {
+    // Written out in full so bundlers see the worker and bundle it.
+    worker = new Worker(new URL("./worker-main.mjs", import.meta.url), { type: "module" });
+  } catch (e) {
+    // A worker script must come from the page's origin. Loaded from
+    // another one (a CDN), start a same-origin worker that imports it;
+    // module imports may cross origins (with CORS).
+    try {
+      const script = new URL("./worker-main.mjs", import.meta.url).href;
+      const blob = new Blob([`import ${JSON.stringify(script)};`], { type: "text/javascript" });
+      const url = URL.createObjectURL(blob);
+      try {
+        worker = new Worker(url, { type: "module" });
+      } finally {
+        // The worker has its own reference to the script once created.
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    } catch {
+      return failed(new Error("pdfdiet: the worker failed to start" + (e instanceof Error ? `: ${e.message}` : "")));
+    }
   }
-  // Written out in full so bundlers see the worker and bundle it.
-  const worker = new Worker(new URL("./worker-main.mjs", import.meta.url), { type: "module" });
   const c = connect(worker as unknown as Port, source.value, () => worker.terminate());
   worker.onerror = (e: ErrorEvent) => {
     e.preventDefault();
     c.fail(new Error("pdfdiet: the worker failed" + (e.message ? `: ${e.message}` : " to start")));
   };
+  return c.api;
+}
+
+// A client with no worker, whose `ready` and every call reject with `e`.
+function failed(e: Error): WorkerApi {
+  const none: Port = { postMessage() {}, onmessage: null, onmessageerror: null };
+  const c = connect(none, undefined, () => {});
+  c.fail(e);
   return c.api;
 }

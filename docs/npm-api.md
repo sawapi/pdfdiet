@@ -152,8 +152,10 @@ try {
 pdfdiet.terminate(); // when done
 ```
 
-- Arguments are copied to the worker, so your buffers stay usable. The
-  `output` of `compress` is moved back without a copy.
+- Arguments are copied to the worker, so your buffers stay usable (a
+  `Uint8Array` that views part of a larger buffer is copied on its own,
+  not with the whole buffer). The `output` of `compress` is moved back
+  without a copy.
 - Calls on one worker run one at a time, in order. Create several workers
   to run in parallel.
 - Errors reject the promise with the same class and message the function
@@ -171,13 +173,22 @@ pdfdiet.terminate(); // when done
   `Uint8Array`, or a `WebAssembly.Module`. Unlike `init`, it cannot take a
   `Response` or a promise, which cannot be sent to a worker; anything else
   makes `ready` and every call reject with a `TypeError`.
-- Bundlers that understand `new Worker(new URL(..., import.meta.url))`
-  (Vite, webpack 5 and others) bundle the worker script.
+- The worker script is `dist/worker-main.mjs`, next to the entry point,
+  started as `new Worker(new URL("./worker-main.mjs", import.meta.url))`:
+  bundlers that understand that form bundle it. Bundlers that pre-bundle
+  dependencies, such as Vite's development server, can break such
+  relative URLs (for the `.wasm` file too); excluding the package from
+  that step (`optimizeDeps.exclude` in Vite) avoids it.
+- Loaded from another origin without a bundler (a CDN, for example), the
+  module starts a same-origin worker that imports the script, which
+  needs the other origin to allow it with CORS.
 - `createWorker` throws a `TypeError` where Web Workers are not available,
   such as in Node.
 - A call that fails inside the wasm with something other than the errors
-  above (running out of memory on a very large file, for example) may
-  leave the worker unusable: terminate it and create a new one.
+  above (running out of memory on a very large file, for example) rejects
+  with a plain `Error` whose `name` is the original one (such as
+  `"RuntimeError"`), and may leave the worker unusable: terminate it and
+  create a new one.
 
 The [website](https://sawapi.github.io/pdfdiet/) works this way; see
 [`web/app.js`](https://github.com/sawapi/pdfdiet/blob/main/web/app.js).

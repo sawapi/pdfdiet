@@ -96,6 +96,40 @@ export async function testWorker(web, input) {
     w.api.terminate();
   }
 
+  // A thrown value that cannot even be turned into a string still gets an
+  // answer, and the calls after it still run.
+  {
+    const evil = { toString() { throw new Error("no"); } };
+    const w = pair({ compress: () => { throw evil; }, inspect: web.inspect });
+    await assert.rejects(w.api.compress(input), /^Error: pdfdiet: unknown error$/);
+    assert.equal((await w.api.inspect(input)).length, 1);
+    w.api.terminate();
+  }
+
+  // A message the worker cannot read fails everything, not just one call.
+  {
+    const sent = [];
+    const fake = { postMessage: (m) => sent.push(m), onmessage: null, onmessageerror: null };
+    serve(fake, web, (w) => web.init(w));
+    fake.onmessageerror({});
+    assert.deepEqual(sent, [
+      { type: "failed", error: { name: "Error", message: "pdfdiet: a message to the worker could not be read" } },
+    ]);
+  }
+
+  // A view into part of a buffer is sent as its own copy, not the whole buffer.
+  {
+    const sent = [];
+    const fake = { postMessage: (m) => sent.push(m), onmessage: null, onmessageerror: null };
+    const c = connect(fake, undefined, () => {});
+    const big = new Uint8Array(1 << 20);
+    const calls = [c.api.inspect(big.subarray(10, 20)), c.api.inspect(big)];
+    assert.equal(sent[1].args[0].buffer.byteLength, 10, "a subarray is compacted");
+    assert.equal(sent[2].args[0], big, "a whole buffer is sent as is");
+    c.api.terminate();
+    for (const call of calls) await assert.rejects(call, /worker terminated/);
+  }
+
   // The entry point itself: Node has no Web Workers.
   const entry = await import("@sawapi/pdfdiet/worker");
   assert.equal(entry.PdfdietError, web.PdfdietError, "one error class for every entry point");
