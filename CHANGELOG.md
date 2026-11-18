@@ -1,12 +1,23 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-- smallpeg 0.15: fixes a panic on crafted Huffman frequency patterns,
-  rejects progressive JPEGs whose successive-approximation scans are out of
-  order (such images are now left as they are), and keeps APPn/COM segments
-  that follow the frame header in place. Output for ordinary documents is
-  unchanged.
+### npm
+
+- `@sawapi/pdfdiet/worker` runs `compress` and `inspect` in a Web
+  Worker. `createWorker()` returns the same functions returning promises,
+  plus `ready` and `terminate()`; errors arrive as the same classes,
+  `PdfdietError` with its `reason`. The website uses it.
+- After a WebAssembly error (a trap, such as running out of memory) the
+  worker stops and rejects later calls, instead of reusing a module that
+  may be in an inconsistent state.
+
+### All builds
+
+- Signed documents: usage-rights and certification signatures referenced
+  only from the catalog's `/Perms`, signature dictionaries without `/Type`,
+  and an indirect `/SigFlags` are now recognized, so such documents are
+  refused unless signatures may be broken.
 - Hardening against hostile documents, from a source review. Output for
   ordinary documents is unchanged.
   - 1-bit images wider or taller than 65535 pixels are left alone, as on
@@ -25,24 +36,21 @@
 - Both command-line tools escape control characters in what they print
   (names in the log and the image table come from the document), so a
   crafted PDF cannot send escape sequences to the terminal.
-- npm worker: after a WebAssembly error (a trap, such as running out of
-  memory) the worker stops and rejects later calls, instead of reusing a
-  module that may be in an inconsistent state.
-- Website: a Content-Security-Policy limits the page to its own scripts,
-  styles and workers.
-- Signed documents: usage-rights and certification signatures referenced
-  only from the catalog's `/Perms`, signature dictionaries without `/Type`,
-  and an indirect `/SigFlags` are now recognized, so such documents are
-  refused unless signatures may be broken.
-- npm: `@sawapi/pdfdiet/worker` runs `compress` and `inspect` in a Web
-  Worker. `createWorker()` returns the same functions returning promises,
-  plus `ready` and `terminate()`; errors arrive as the same classes,
-  `PdfdietError` with its `reason`. The website uses it.
-- Website: a document refused for its owner password (restrictions on
-  printing, copying or editing) now offers a button to remove the
-  restrictions and compress it. The choice is per file, and the result
-  says the restrictions were removed. Encrypted and signed documents are
-  still never processed on the page.
+- smallpeg 0.15: fixes a panic on crafted Huffman frequency patterns,
+  rejects progressive JPEGs whose successive-approximation scans are out of
+  order (such images are now left as they are), and keeps APPn/COM segments
+  that follow the frame header in place. Output for ordinary documents is
+  unchanged.
+
+### Website
+
+- A document refused for its owner password (restrictions on printing,
+  copying or editing) now offers a button to remove the restrictions and
+  compress it. The choice is per file, and the result says the
+  restrictions were removed. Encrypted and signed documents are still
+  never processed on the page.
+- A Content-Security-Policy limits the page to its own scripts, styles
+  and workers.
 
 ## 0.2.0
 
