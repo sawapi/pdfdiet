@@ -43,7 +43,8 @@ export type WorkerApi = {
 // to compile if Api gains or loses one.
 const names = ["compress", "inspect"] as const;
 type Assert<T extends true> = T;
-type _Exhaustive = Assert<[keyof Api] extends [(typeof names)[number]] ? true : false>;
+type Name = (typeof names)[number];
+type _Exhaustive = Assert<[keyof Api] extends [Name] ? ([Name] extends [keyof Api] ? true : false) : false>;
 
 interface WireError {
   name: string;
@@ -224,7 +225,10 @@ export function connect(
     return new Promise((resolve, reject) => {
       const id = ++nextId;
       try {
-        port.postMessage({ type: "call", id, fn, args: args.map(compact) } satisfies ClientMessage, []);
+        // A compacted copy is ours: move it rather than copy it again.
+        const sent = args.map(compact);
+        const moved = sent.filter((a, i) => a !== args[i]).map((a) => (a as Uint8Array).buffer as ArrayBuffer);
+        port.postMessage({ type: "call", id, fn, args: sent } satisfies ClientMessage, moved);
       } catch (e) {
         reject(sendError(e));
         return;

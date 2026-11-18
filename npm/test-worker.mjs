@@ -120,12 +120,15 @@ export async function testWorker(web, input) {
   // A view into part of a buffer is sent as its own copy, not the whole buffer.
   {
     const sent = [];
-    const fake = { postMessage: (m) => sent.push(m), onmessage: null, onmessageerror: null };
+    const moved = [];
+    const fake = { postMessage: (m, t) => (sent.push(m), moved.push(t)), onmessage: null, onmessageerror: null };
     const c = connect(fake, undefined, () => {});
     const big = new Uint8Array(1 << 20);
     const calls = [c.api.inspect(big.subarray(10, 20)), c.api.inspect(big)];
     assert.equal(sent[1].args[0].buffer.byteLength, 10, "a subarray is compacted");
     assert.equal(sent[2].args[0], big, "a whole buffer is sent as is");
+    assert.deepEqual(moved.map((t) => t.length), [0, 1, 0], "only the compacted copy is transferred");
+    assert.equal(big.byteLength, 1 << 20, "the caller's buffer is not detached");
     c.api.terminate();
     for (const call of calls) await assert.rejects(call, /worker terminated/);
   }
