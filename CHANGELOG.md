@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- npm: `@sawapi/pdfdiet/worker` runs `compress` and `inspect` in a Web
+  Worker. `createWorker()` returns the same functions returning promises,
+  plus `ready` and `terminate()`; errors arrive as the same classes,
+  `PdfdietError` with its `reason`. The website uses it.
 - Website: a document refused for its owner password (restrictions on
   printing, copying or editing) now offers a button to remove the
   restrictions and compress it. The choice is per file, and the result

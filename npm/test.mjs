@@ -157,6 +157,10 @@ const decls = (f) => {
 };
 assert.equal(decls("node.d.mts"), decls("web.d.mts"), "compress/inspect declarations match");
 
+// The worker entry point's protocol, over a MessageChannel.
+const { testWorker } = await import("./test-worker.mjs");
+await testWorker(web, input);
+
 // Each way of loading the wasm, in a fresh process: once the glue has
 // loaded, it ignores later loads, so one process would hide a broken form.
 const initCases = [

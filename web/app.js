@@ -1,3 +1,5 @@
+import { createWorker, PdfdietError } from "./pkg/dist/worker.mjs";
+
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
 
@@ -9,42 +11,35 @@ const fmt = (n) => {
 const setState = (s) => (stage.dataset.state = s);
 
 // ---- worker lifecycle ----------------------------------------------------
-// One worker, one job at a time. Cancelling (or a settings change while a
-// job runs) terminates it and starts a fresh one: wasm cannot be interrupted.
-let worker = null;
+// The package's worker entry point runs pdfdiet off the main thread. One
+// job at a time; cancelling (or a settings change while a job runs)
+// terminates the worker and starts a fresh one: wasm cannot be interrupted.
+let engine = null;
 let engineReady = false;
 let jobId = 0;
-let running = null; // { id, name, size, t0, timer }
+let running = null; // { id, name, size, t0, timer, stripped }
 
 function spawn() {
   engineReady = false;
-  worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
-  worker.onmessage = ({ data }) => {
-    if ("ready" in data) {
-      engineReady = data.ready;
-      $("engine").textContent = data.ready
-        ? "Processed on this device — nothing is uploaded."
-        : "Couldn't load the engine: " + data.error;
-      if (data.ready && pendingRun) {
+  const e = (engine = createWorker());
+  e.ready.then(
+    () => {
+      if (engine !== e) return;
+      engineReady = true;
+      $("engine").textContent = "Processed on this device — nothing is uploaded.";
+      if (pendingRun) {
         pendingRun = false;
         run();
       }
-      return;
-    }
-    if (!running || data.id !== running.id) return;
-    finish(data);
-  };
-  worker.onerror = (e) => {
-    if (running) {
-      stopTimer();
-      showError(running.name, "The engine stopped unexpectedly" + (e.message ? `: ${e.message}` : "") + ". The file may be too large for this browser.");
-      running = null;
-    }
-    restart();
-  };
+    },
+    (err) => {
+      if (engine !== e) return; // replaced on purpose
+      $("engine").textContent = "Couldn't load the engine: " + err.message;
+    },
+  );
 }
 function restart() {
-  worker?.terminate();
+  engine?.terminate();
   spawn();
 }
 spawn();
@@ -132,9 +127,29 @@ function run() {
     timer: setInterval(() => ($("elapsed").textContent = ((performance.now() - t0) / 1000).toFixed(1)), 100),
   };
   $("elapsed").textContent = "0.0";
-  // Copy: the original stays here so settings can be changed and re-run.
-  const input = file.bytes.slice(0);
-  worker.postMessage({ id, input, ...settings(), stripProtection: file.stripProtection }, [input]);
+  // The worker gets a copy: the original stays here so settings can be
+  // changed and re-run. Owner-password restrictions are removed only when
+  // the person chose to for this file; signatures are never broken here.
+  engine
+    .compress(new Uint8Array(file.bytes), { ...settings(), stripProtection: file.stripProtection })
+    .then(
+      (res) => {
+        if (running?.id !== id) return;
+        finish({ ok: true, ...res, log: res.log.join("\n"), ms: performance.now() - t0 });
+      },
+      (err) => {
+        if (running?.id !== id) return;
+        if (err instanceof PdfdietError || err instanceof TypeError || err instanceof RangeError) {
+          finish({ ok: false, reason: err.reason, error: err.message });
+          return;
+        }
+        // The engine itself failed (out of memory, most likely): start afresh.
+        stopTimer();
+        showError(running.name, `The engine stopped unexpectedly: ${err.message}. The file may be too large for this browser.`);
+        running = null;
+        restart();
+      },
+    );
 }
 function stopTimer() {
   if (running) clearInterval(running.timer);
