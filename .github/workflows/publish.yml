@@ -84,7 +84,10 @@ jobs:
 
       - name: Install Binaryen (wasm-opt)
         run: |
-          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          # Verified against the digest recorded here before anything runs.
+          curl -sSfLo "$RUNNER_TEMP/binaryen.tgz" https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          echo "c55b74f3109cdae97490faf089b0286d3bba926bb6ea5ed00c8c784fc53718fd  $RUNNER_TEMP/binaryen.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/binaryen.tgz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_116/bin" >> "$GITHUB_PATH"
 
       - name: Build and test the npm package

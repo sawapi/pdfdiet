@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -22,20 +20,20 @@ jobs:
     if: ${{ !github.event.repository.private }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: pdfdiet
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: sawapi/smallpeg
           path: smallpeg
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: pdfdiet
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Install wasm-bindgen CLI (the version in Cargo.lock)
@@ -45,7 +43,10 @@ jobs:
           cargo install wasm-bindgen-cli --version "$v" --locked
       - name: Install Binaryen (wasm-opt)
         run: |
-          curl -sSfL https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          # Verified against the digest recorded here before anything runs.
+          curl -sSfLo "$RUNNER_TEMP/binaryen.tgz" https://github.com/WebAssembly/binaryen/releases/download/version_116/binaryen-version_116-x86_64-linux.tar.gz
+          echo "c55b74f3109cdae97490faf089b0286d3bba926bb6ea5ed00c8c784fc53718fd  $RUNNER_TEMP/binaryen.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/binaryen.tgz" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_116/bin" >> "$GITHUB_PATH"
       - name: Install TypeScript
         working-directory: pdfdiet/npm
@@ -60,6 +61,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Only the deploy job may publish to Pages.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
