@@ -129,6 +129,12 @@ try {
 }
 ```
 
+Anything else, such as a `WebAssembly.RuntimeError` from running out of
+memory on a very large file, means the module may be left in an
+inconsistent state: in Node restart the process, and in the browser
+prefer the [worker](#in-a-web-worker), which stops itself and can be
+replaced.
+
 `TypeError` and `RangeError` messages start with `pdfdiet: `.
 `PdfdietError` messages do not; its class tells where it came from.
 
@@ -187,8 +193,9 @@ pdfdiet.terminate(); // when done
 - A call that fails inside the wasm with something other than the errors
   above (running out of memory on a very large file, for example) rejects
   with a plain `Error` whose `name` is the original one (such as
-  `"RuntimeError"`), and may leave the worker unusable: terminate it and
-  create a new one.
+  `"RuntimeError"`). The worker then stops, since the module may be left
+  in an inconsistent state: later calls reject, and `terminate()` it and
+  create a new one to go on.
 
 The [website](https://sawapi.github.io/pdfdiet/) works this way; see
 [`web/app.js`](https://github.com/sawapi/pdfdiet/blob/main/web/app.js).

@@ -226,6 +226,12 @@ try {
   const junk = spawnSync(process.execPath, [cli, "inspect", junkPath], { encoding: "utf8" });
   assert.equal(junk.status, 1);
   assert.match(junk.stderr, /^pdfdiet: [^\n]+\n$/);
+  // Names from the document reach the terminal with control characters
+  // escaped: a color space named with an ESC byte is shown as \u{1b}.
+  const evilPath = join(dir, "evil.pdf");
+  writeFileSync(evilPath, fixXref(Buffer.from(input.toString("latin1").replace("/ColorSpace /DeviceRGB", "/ColorSpace /Evil#1b#5b2J"), "latin1")));
+  const evil = execFileSync(process.execPath, [cli, "inspect", evilPath], { encoding: "utf8" });
+  assert.ok(!evil.includes("\x1b") && evil.includes("Evil\\u{1b}[2J"), `cli: control characters escaped: ${JSON.stringify(evil)}`);
   // A missing file is a one-line error too.
   let missing;
   try {

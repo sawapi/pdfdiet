@@ -3,9 +3,11 @@
 # published WebAssembly module.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-python3 tools/gen_licenses.py > /tmp/pdfdiet_licenses.md
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+python3 tools/gen_licenses.py > "$tmp"
 {
   sed -n '1,9p' npm/THIRD_PARTY.md
-  cat /tmp/pdfdiet_licenses.md
+  cat "$tmp"
 } > npm/THIRD_PARTY.md.new && mv npm/THIRD_PARTY.md.new npm/THIRD_PARTY.md
 echo "wrote npm/THIRD_PARTY.md"
