@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, statSync } from "node:fs";
+import { chmodSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { compress, PdfdietError } from "../dist/node.mjs";
 import { inspect_table } from "../node/pdfdiet_wasm.js";
 
@@ -36,6 +37,30 @@ const hints = {
 // Text for the terminal with control characters (other than newline and
 // tab) escaped: names in the log and the table come from the document, and
 // a PDF name can hold any byte, including escape sequences.
+// Write through a temporary file in the same directory, renamed over the
+// target only once complete, so a failed write never leaves a truncated
+// file (even when the output is the input). A symlink is followed and the
+// target keeps its permissions.
+function writeReplacing(path, data) {
+  let target = path;
+  try {
+    target = realpathSync(path);
+  } catch {}
+  const tmp = join(dirname(target), `.${basename(target)}.pdfdiet-${process.pid}.tmp`);
+  try {
+    writeFileSync(tmp, data, { flag: "wx", flush: true });
+    try {
+      chmodSync(tmp, statSync(target).mode & 0o7777);
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+    renameSync(tmp, target);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
 const printable = (s) =>
   String(s).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, (c) => `\\u{${c.charCodeAt(0).toString(16)}}`);
 
@@ -103,10 +128,10 @@ if (cmd === "inspect") {
   const res = run(() =>
     compress(data, { dpi, quality, subsetOutlines, stripJpegMetadata, stripProtection, breakSignatures }),
   );
-  run(() => writeFileSync(output, res.output));
+  run(() => writeReplacing(output, res.output));
   for (const line of res.log) console.log(printable(line));
   console.log(`\n${res.imagesRecompressed}/${res.imagesTotal} images recompressed`);
-  const outLen = statSync(output).size;
+  const outLen = res.output.length;
   console.log(
     `${data.length} -> ${outLen} bytes (${((outLen / data.length) * 100).toFixed(1)}%)`
   );

@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- A document whose object stream cannot be read (it does not parse, or
+  inflates past the limit) is no longer compressed. The loader drops such
+  a stream with every object in it, so the output would have lost them,
+  and a signature stored there would have gone unnoticed. It now fails as
+  an invalid PDF (`invalid-pdf` in npm).
+- Both command-line tools write the output to a temporary file next to it
+  and rename it into place, so a failed write never leaves a truncated
+  file, even when `-o` names the input. A symlinked output is followed,
+  and an existing file keeps its permissions.
+
 ## 0.3.0
 
 ### npm
