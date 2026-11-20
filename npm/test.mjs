@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -232,6 +232,19 @@ try {
   writeFileSync(evilPath, fixXref(Buffer.from(input.toString("latin1").replace("/ColorSpace /DeviceRGB", "/ColorSpace /Evil#1b#5b2J"), "latin1")));
   const evil = execFileSync(process.execPath, [cli, "inspect", evilPath], { encoding: "utf8" });
   assert.ok(!evil.includes("\x1b") && evil.includes("Evil\\u{1b}[2J"), `cli: control characters escaped: ${JSON.stringify(evil)}`);
+  // The output may be the input, or a symlink to it: the file is replaced
+  // only once the new one is complete, the link stays, and no temporary
+  // file is left behind.
+  const inPlace = join(dir, "in-place.pdf");
+  writeFileSync(inPlace, input);
+  chmodSync(inPlace, 0o640);
+  const inPlaceLink = join(dir, "in-place-link.pdf");
+  symlinkSync(inPlace, inPlaceLink);
+  execFileSync(process.execPath, [cli, "compress", inPlaceLink, "-o", inPlaceLink], { stdio: "pipe" });
+  assert.ok(lstatSync(inPlaceLink).isSymbolicLink(), "cli: output symlink kept");
+  assert.deepEqual(readFileSync(inPlace), out, "cli: in-place output");
+  assert.equal(statSync(inPlace).mode & 0o777, 0o640, "cli: permissions kept");
+  assert.deepEqual(readdirSync(dir).filter((n) => n.endsWith(".tmp")), [], "cli: no temporary file left");
   // A missing file is a one-line error too.
   let missing;
   try {

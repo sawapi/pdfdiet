@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use pdfdiet::{CompressOptions, compress_bytes, format_inspect_table, inspect_bytes};
@@ -123,8 +124,8 @@ fn inspect(input: &PathBuf) -> Result<(), AnyError> {
 
 #[allow(clippy::too_many_arguments)]
 fn compress(
-    input: &PathBuf,
-    output: &PathBuf,
+    input: &Path,
+    output: &Path,
     dpi: f64,
     quality: u8,
     strip_protection: bool,
@@ -139,8 +140,9 @@ fn compress(
         .break_signatures(break_signatures)
         .subset_outlines(subset_outlines)
         .strip_jpeg_metadata(strip_jpeg_metadata);
-    let (pdf, stats) = compress_bytes(&std::fs::read(input)?, &opts)?;
-    std::fs::write(output, pdf)?;
+    let data = std::fs::read(input)?;
+    let (pdf, stats) = compress_bytes(&data, &opts)?;
+    write_replacing(output, &pdf)?;
 
     for line in &stats.log {
         println!("{}", printable(line));
@@ -154,8 +156,7 @@ fn compress(
         stats.fonts_converted,
         stats.stream_bytes_saved
     );
-    let in_size = std::fs::metadata(input)?.len();
-    let out_size = std::fs::metadata(output)?.len();
+    let (in_size, out_size) = (data.len(), pdf.len());
     println!(
         "{} -> {} bytes ({:.1}%)",
         in_size,
@@ -163,6 +164,39 @@ fn compress(
         out_size as f64 / in_size as f64 * 100.0
     );
     Ok(())
+}
+
+/// Write `data` to `path` through a temporary file in the same directory,
+/// renamed over the target only once it is complete, so a failed write
+/// (disk full, I/O error) never leaves a truncated file, even when the
+/// output is the input. A symlink is followed and the target file keeps
+/// its permissions.
+fn write_replacing(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = target.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "output must name a file")
+    })?;
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".pdfdiet-{}.tmp", std::process::id()));
+    let tmp = target.with_file_name(tmp_name);
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(data)?;
+        if let Ok(meta) = std::fs::metadata(&target) {
+            file.set_permissions(meta.permissions())?;
+        }
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, &target)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -173,5 +207,40 @@ mod tests {
             super::printable("a\u{1b}[2Jb\nc\td\u{9b}"),
             "a\\u{1b}[2Jb\nc\td\\u{9b}"
         );
+    }
+    #[test]
+    fn write_replacing_follows_symlinks_and_leaves_no_temp() {
+        let dir = std::env::temp_dir().join(format!("pdfdiet-wr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("out.pdf");
+        super::write_replacing(&file, b"one").unwrap();
+        super::write_replacing(&file, b"two").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"two");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+            let link = dir.join("link.pdf");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            super::write_replacing(&link, b"three").unwrap();
+            assert!(
+                std::fs::symlink_metadata(&link)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), b"three");
+            let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o640);
+        }
+        assert!(super::write_replacing(&dir, b"x").is_err());
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

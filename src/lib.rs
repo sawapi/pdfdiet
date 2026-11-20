@@ -295,6 +295,7 @@ pub fn compress_bytes(
     opts: &CompressOptions,
 ) -> Result<(Vec<u8>, CompressStats), Error> {
     let mut doc = Document::load_mem_with_options(input, load_options()).map_err(pdf_error)?;
+    check_object_streams(&doc).map_err(pdf_error)?;
     let stats = compress_document(&mut doc, opts)?;
     let mut out = Vec::new();
     doc.save_with_options(&mut out, compact_save_options())
@@ -759,6 +760,28 @@ fn check_document(doc: &Document, opts: &CompressOptions) -> Result<(), Refusal>
     Ok(())
 }
 
+/// The loader drops an object stream it cannot parse (or that inflates past
+/// the limit) together with every object inside it, without an error. The
+/// output would then lose those objects, and a signature stored there would
+/// go unnoticed, so such a document is not processed.
+fn check_object_streams(doc: &Document) -> Result<(), lopdf::Error> {
+    let mut lost = std::collections::BTreeMap::<u32, usize>::new();
+    for (&id, entry) in &doc.reference_table.entries {
+        if let lopdf::xref::XrefEntry::Compressed { container, .. } = *entry
+            && !doc.objects.contains_key(&(id, 0))
+        {
+            *lost.entry(container).or_default() += 1;
+        }
+    }
+    match lost.iter().next() {
+        None => Ok(()),
+        Some((container, count)) => Err(lopdf::Error::InvalidObjectStream(format!(
+            "object stream {container} could not be read ({count} objects in it, {} in all, would be lost)",
+            lost.values().sum::<usize>()
+        ))),
+    }
+}
+
 /// Whether the document carries digital signatures (which any rewrite would
 /// invalidate — their ByteRange refers to the original bytes).
 fn document_is_signed(doc: &Document) -> bool {
@@ -888,6 +911,7 @@ pub(crate) fn resolve_dict<'a>(
 #[cfg(test)]
 mod signature_tests {
     use super::*;
+    use lopdf::dictionary;
 
     fn doc_with_catalog(build: impl FnOnce(&mut Document, &mut Dictionary)) -> Document {
         let mut doc = Document::with_version("1.7");
@@ -929,5 +953,53 @@ mod signature_tests {
         });
         assert!(document_is_signed(&doc));
         assert!(!document_is_signed(&doc_with_catalog(|_, _| {})));
+    }
+    #[test]
+    fn unreadable_object_streams_are_refused() {
+        let mut doc = doc_with_catalog(|_, _| {});
+        assert!(check_object_streams(&doc).is_ok());
+        // The xref says object 50 lives in object stream 40, but the loader
+        // could not produce it.
+        doc.reference_table.entries.insert(
+            50,
+            lopdf::xref::XrefEntry::Compressed {
+                container: 40,
+                index: 0,
+            },
+        );
+        let err = check_object_streams(&doc).unwrap_err().to_string();
+        assert!(err.contains("object stream 40"), "{err}");
+    }
+
+    #[test]
+    fn a_corrupt_object_stream_fails_compression() {
+        let mut doc = Document::with_version("1.7");
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "MediaBox" => vec![0.into(), 0.into(), 10.into(), 10.into()],
+        });
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_with_options(&mut bytes, compact_save_options())
+            .unwrap();
+        assert!(compress_bytes(&bytes, &CompressOptions::default()).is_ok());
+        // Rename the object stream's /First key (same length, so the xref
+        // offsets stay valid): the loader can no longer parse that stream.
+        let at = bytes
+            .windows(6)
+            .position(|w| w == b"/First")
+            .expect("an object stream");
+        bytes[at..at + 6].copy_from_slice(b"/Fxrst");
+        let err = compress_bytes(&bytes, &CompressOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("could not be read"), "{err}");
     }
 }
