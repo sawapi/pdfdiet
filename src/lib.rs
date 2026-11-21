@@ -50,6 +50,7 @@ mod fontunion;
 mod images;
 mod jpeg;
 mod limits;
+mod parallel;
 mod recompress;
 mod subset;
 mod type1;
@@ -68,7 +69,7 @@ use jpeg::{
     strip_jpeg_metadata, try_lossless_jpeg_optimize,
 };
 use recompress::{
-    BilevelOutcome, MatteHalf, TwoColor, bleed_under_soft_mask, recompress_bilevel,
+    BilevelOutcome, MatteHalf, Staged, TwoColor, bleed_under_soft_mask, recompress_bilevel,
     recompress_matte_pairs, recompress_two_color, resize_image, smallest_encoding,
 };
 
@@ -393,274 +394,11 @@ pub(crate) fn compress_document(
         })
         .collect();
 
-    for info in &images {
-        match matte_done.get(&info.id) {
-            Some(MatteHalf::Written) => continue,
-            Some(MatteHalf::Kept) => {
-                // Pixels stay as they are; a DCT half can still be
-                // entropy-optimized, which changes nothing the pair relies on.
-                if let Some((from, to)) = try_lossless_jpeg_optimize(doc, info) {
-                    stats.log.push(format!(
-                        "obj {} {}: {} -> {} bytes [lossless entropy]",
-                        info.id.0, info.id.1, from, to
-                    ));
-                    stats.stream_bytes_saved += from as i64 - to as i64;
-                    stats.images_recompressed += 1;
-                }
-                continue;
-            }
-            None => {}
-        }
-        // Bilevel images take the lossless CCITT G4 path; the JPEG pipeline
-        // below is 8-bit only and would be lossy on scanned text anyway.
-        if info.bpc == 1 {
-            match recompress_bilevel(doc, info) {
-                BilevelOutcome::Recompressed { to } => {
-                    stats.log.push(format!(
-                        "obj {} {}: {} -> {} bytes [G4 lossless]",
-                        info.id.0, info.id.1, info.stream_len, to
-                    ));
-                    stats.stream_bytes_saved += info.stream_len as i64 - to as i64;
-                    stats.images_recompressed += 1;
-                }
-                BilevelOutcome::Larger => {
-                    stats.log.push(format!(
-                        "keep obj {} {}: G4 >= original {}",
-                        info.id.0, info.id.1, info.stream_len
-                    ));
-                }
-                BilevelOutcome::Unsupported => {
-                    stats.log.push(format!(
-                        "skip obj {} {} ({}, {}): unsupported bilevel variant",
-                        info.id.0,
-                        info.id.1,
-                        info.color,
-                        info.filters.join("+")
-                    ));
-                }
-            }
-            continue;
-        }
-
-        let decoded = match decode_image(doc, info.id) {
-            Ok(img) => img,
-            Err(reason) => {
-                // CMYK JPEGs never go through RGB: their four stored channels
-                // are resampled and re-encoded as they are (see
-                // recompress_cmyk_jpeg).
-                let mut cmyk_larger = None;
-                match recompress_cmyk_jpeg(doc, info, opts) {
-                    CmykOutcome::Recompressed { to, resized, flate } => {
-                        stats.log.push(format!(
-                            "obj {} {}: {} -> {} bytes{} [cmyk{}]",
-                            info.id.0,
-                            info.id.1,
-                            info.stream_len,
-                            to,
-                            resized
-                                .map(|(w, h)| format!(" (downsampled to {w}x{h})"))
-                                .unwrap_or_default(),
-                            if flate { ", flate" } else { "" }
-                        ));
-                        stats.stream_bytes_saved += info.stream_len as i64 - to as i64;
-                        stats.images_recompressed += 1;
-                        continue;
-                    }
-                    // Fall through to the lossless attempt below; if that
-                    // fails too, the image is reported as kept, not skipped.
-                    CmykOutcome::Larger { to } => cmyk_larger = Some(to),
-                    CmykOutcome::NotApplicable => {}
-                }
-                // Even when the pixel pipeline can't handle this image (CMYK,
-                // Decode arrays, ...), a DCT stream can still be
-                // entropy-optimized losslessly: the coefficients are
-                // untouched, so every PDF-level property stays valid.
-                if let Some((from, to)) = try_lossless_jpeg_optimize(doc, info) {
-                    stats.log.push(format!(
-                        "obj {} {}: {} -> {} bytes [lossless entropy]",
-                        info.id.0, info.id.1, from, to
-                    ));
-                    stats.stream_bytes_saved += from as i64 - to as i64;
-                    stats.images_recompressed += 1;
-                } else if let Some(to) = cmyk_larger {
-                    stats.log.push(format!(
-                        "keep obj {} {}: cmyk re-encode {} >= original {}",
-                        info.id.0, info.id.1, to, info.stream_len
-                    ));
-                } else {
-                    stats.log.push(format!(
-                        "skip obj {} {} ({}, {}): {reason}",
-                        info.id.0,
-                        info.id.1,
-                        info.color,
-                        info.filters.join("+")
-                    ));
-                }
-                continue;
-            }
-        };
-
-        // Images made of at most two colors (QR codes, binarized line art
-        // stored as 8-bit) become 1-bit palette images at full resolution:
-        // exact, and nothing to blur.
-        match recompress_two_color(doc, info, &decoded, soft_masks.contains(&info.id)) {
-            TwoColor::Recompressed { to } => {
-                stats.log.push(format!(
-                    "obj {} {}: {} -> {} bytes [2-color, lossless]",
-                    info.id.0, info.id.1, info.stream_len, to
-                ));
-                stats.stream_bytes_saved += info.stream_len as i64 - to as i64;
-                stats.images_recompressed += 1;
-                continue;
-            }
-            TwoColor::Larger { to } => {
-                stats.log.push(format!(
-                    "keep obj {} {}: 2-color lossless {} >= original {}",
-                    info.id.0, info.id.1, to, info.stream_len
-                ));
-                continue;
-            }
-            TwoColor::MoreColors => {}
-        }
-        let mut img = decoded;
-        // Colors under fully transparent pixels are never shown, but
-        // resampling and JPEG (of this image and of its mask) spread them
-        // into the visible edge; replace them with nearby visible colors.
-        let bled = bleed_under_soft_mask(doc, info.id, &mut img);
-        let (new_w, new_h) = target_size(info, opts);
-        let resized = new_w != info.width as u32 || new_h != info.height as u32;
-        if resized {
-            img = resize_image(&img, new_w, new_h);
-        }
-
-        // Decide how to treat color: RGB images that are visually grayscale
-        // become single-channel; sharp chroma edges (stamps, colored line art)
-        // disable chroma subsampling, which visibly bleeds there.
-        let mut sharp_chroma = false;
-        let mut mode = "";
-        if let DynamicImage::ImageRgb8(ref rgb) = img {
-            match classify_chroma(rgb) {
-                ChromaClass::Gray => {
-                    img = DynamicImage::ImageLuma8(image::imageops::grayscale(&img));
-                    mode = " [gray]";
-                }
-                ChromaClass::SharpColor => {
-                    sharp_chroma = true;
-                    mode = " [4:4:4]";
-                }
-                ChromaClass::SmoothColor => {}
-            }
-        }
-
-        let gray = matches!(img, DynamicImage::ImageLuma8(_));
-        let decoded_components: u8 = if gray { 1 } else { 3 };
-        // If pixel components are preserved, the original ColorSpace (ICC included) can be kept.
-        let keep_colorspace = info.components == Some(decoded_components);
-        // An expanded Indexed image takes its palette's base color space
-        // (ICC profile included), unless it was reduced to gray.
-        let indexed_base = match doc.get_object(info.id) {
-            Ok(Object::Stream(s)) => indexed_palette(doc, &s.dict).ok().flatten(),
-            _ => None,
-        };
-        let is_indexed = indexed_base.is_some();
-        if is_indexed && mode.is_empty() {
-            mode = " [indexed]";
-        }
-        let mode = if bled {
-            format!("{mode} [bled]")
-        } else {
-            mode.to_string()
-        };
-        let new_colorspace = match indexed_base {
-            Some((c, _, base)) if c == decoded_components => Some(base),
-            _ if keep_colorspace => None,
-            _ => Some(Object::Name(if gray {
-                b"DeviceGray".to_vec()
-            } else {
-                b"DeviceRGB".to_vec()
-            })),
-        };
-
-        // Palette images are mostly flat-color art: once resampled, a
-        // lossless Flate encoding of it can beat JPEG, and then it wins.
-        let encoded = if is_indexed && resized {
-            smallest_encoding(&img, opts.jpeg_quality, sharp_chroma)
-        } else {
-            encode_jpeg(&img, opts.jpeg_quality, sharp_chroma)
-                .map(|j| (j, Some(b"DCTDecode".as_slice())))
-        };
-        let Some((jpeg, filter)) = encoded else {
-            stats.log.push(format!(
-                "keep obj {} {}: jpeg encode failed or not baseline-conformant",
-                info.id.0, info.id.1
-            ));
-            continue;
-        };
-
-        if jpeg.len() >= info.stream_len {
-            // Recompressing lost; if the original is DCT, still try the
-            // lossless entropy re-optimization before keeping it as-is.
-            if let Some((from, to)) = try_lossless_jpeg_optimize(doc, info) {
-                stats.log.push(format!(
-                    "obj {} {}: {} -> {} bytes [lossless entropy]",
-                    info.id.0, info.id.1, from, to
-                ));
-                stats.stream_bytes_saved += from as i64 - to as i64;
-                stats.images_recompressed += 1;
-            } else {
-                stats.log.push(format!(
-                    "keep obj {} {}: recompressed {} >= original {}",
-                    info.id.0,
-                    info.id.1,
-                    jpeg.len(),
-                    info.stream_len
-                ));
-            }
-            continue;
-        }
-
-        let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
-            continue;
-        };
-        let dict = &mut stream.dict;
-        dict.set("Width", img.width() as i64);
-        dict.set("Height", img.height() as i64);
-        dict.set("BitsPerComponent", 8i64);
-        if let Some(cs) = new_colorspace {
-            dict.set("ColorSpace", cs);
-        }
-        match filter {
-            Some(f) => dict.set("Filter", Object::Name(f.to_vec())),
-            None => {
-                dict.remove(b"Filter");
-            }
-        }
-        dict.remove(b"DecodeParms");
-        dict.remove(b"Decode");
-        dict.set("Length", jpeg.len() as i64);
-        stream.set_content(jpeg.clone());
-        stream.allows_compression = false;
-
-        stats.log.push(format!(
-            "obj {} {}: {} -> {} bytes{}{}{}",
-            info.id.0,
-            info.id.1,
-            info.stream_len,
-            jpeg.len(),
-            if resized {
-                format!(" (downsampled to {}x{})", img.width(), img.height())
-            } else {
-                String::new()
-            },
-            mode,
-            if filter == Some(b"FlateDecode".as_slice()) {
-                " [flate]"
-            } else {
-                ""
-            }
-        ));
-        stats.stream_bytes_saved += info.stream_len as i64 - jpeg.len() as i64;
-        stats.images_recompressed += 1;
+    let outcomes = process_images(doc, &images, opts, &matte_done, &soft_masks);
+    for outcome in outcomes.into_iter().flatten() {
+        stats.log.extend(outcome.log);
+        stats.stream_bytes_saved += outcome.saved;
+        stats.images_recompressed += outcome.recompressed;
     }
 
     if opts.strip_jpeg_metadata {
@@ -735,6 +473,379 @@ pub(crate) fn compress_document(
         doc.version = "1.5".into();
     }
     Ok(stats)
+}
+
+/// What processing one image produced: its log lines and savings, and the
+/// stream it replaces (written back by the caller).
+#[derive(Default)]
+struct ImageOutcome {
+    log: Vec<String>,
+    saved: i64,
+    recompressed: usize,
+    staged: Staged,
+}
+
+/// Recompress one image, reading the document only. `matte` says what
+/// recompress_matte_pairs did with it, if it is half of a /Matte pair.
+fn process_image(
+    doc: &Document,
+    info: &ImageInfo,
+    opts: &CompressOptions,
+    matte: Option<&MatteHalf>,
+    is_soft_mask: bool,
+) -> ImageOutcome {
+    let mut out = ImageOutcome::default();
+    match matte {
+        Some(MatteHalf::Written) => return out,
+        Some(MatteHalf::Kept) => {
+            // Pixels stay as they are; a DCT half can still be
+            // entropy-optimized, which changes nothing the pair relies on.
+            if let Some((from, to)) = try_lossless_jpeg_optimize(doc, &mut out.staged, info) {
+                out.log.push(format!(
+                    "obj {} {}: {} -> {} bytes [lossless entropy]",
+                    info.id.0, info.id.1, from, to
+                ));
+                out.saved += from as i64 - to as i64;
+                out.recompressed += 1;
+            }
+            return out;
+        }
+        None => {}
+    }
+    // Bilevel images take the lossless CCITT G4 path; the JPEG pipeline
+    // below is 8-bit only and would be lossy on scanned text anyway.
+    if info.bpc == 1 {
+        match recompress_bilevel(doc, &mut out.staged, info) {
+            BilevelOutcome::Recompressed { to } => {
+                out.log.push(format!(
+                    "obj {} {}: {} -> {} bytes [G4 lossless]",
+                    info.id.0, info.id.1, info.stream_len, to
+                ));
+                out.saved += info.stream_len as i64 - to as i64;
+                out.recompressed += 1;
+            }
+            BilevelOutcome::Larger => {
+                out.log.push(format!(
+                    "keep obj {} {}: G4 >= original {}",
+                    info.id.0, info.id.1, info.stream_len
+                ));
+            }
+            BilevelOutcome::Unsupported => {
+                out.log.push(format!(
+                    "skip obj {} {} ({}, {}): unsupported bilevel variant",
+                    info.id.0,
+                    info.id.1,
+                    info.color,
+                    info.filters.join("+")
+                ));
+            }
+        }
+        return out;
+    }
+
+    let decoded = match decode_image(doc, info.id) {
+        Ok(img) => img,
+        Err(reason) => {
+            // CMYK JPEGs never go through RGB: their four stored channels
+            // are resampled and re-encoded as they are (see
+            // recompress_cmyk_jpeg).
+            let mut cmyk_larger = None;
+            match recompress_cmyk_jpeg(doc, &mut out.staged, info, opts) {
+                CmykOutcome::Recompressed { to, resized, flate } => {
+                    out.log.push(format!(
+                        "obj {} {}: {} -> {} bytes{} [cmyk{}]",
+                        info.id.0,
+                        info.id.1,
+                        info.stream_len,
+                        to,
+                        resized
+                            .map(|(w, h)| format!(" (downsampled to {w}x{h})"))
+                            .unwrap_or_default(),
+                        if flate { ", flate" } else { "" }
+                    ));
+                    out.saved += info.stream_len as i64 - to as i64;
+                    out.recompressed += 1;
+                    return out;
+                }
+                // Fall through to the lossless attempt below; if that
+                // fails too, the image is reported as kept, not skipped.
+                CmykOutcome::Larger { to } => cmyk_larger = Some(to),
+                CmykOutcome::NotApplicable => {}
+            }
+            // Even when the pixel pipeline can't handle this image (CMYK,
+            // Decode arrays, ...), a DCT stream can still be
+            // entropy-optimized losslessly: the coefficients are
+            // untouched, so every PDF-level property stays valid.
+            if let Some((from, to)) = try_lossless_jpeg_optimize(doc, &mut out.staged, info) {
+                out.log.push(format!(
+                    "obj {} {}: {} -> {} bytes [lossless entropy]",
+                    info.id.0, info.id.1, from, to
+                ));
+                out.saved += from as i64 - to as i64;
+                out.recompressed += 1;
+            } else if let Some(to) = cmyk_larger {
+                out.log.push(format!(
+                    "keep obj {} {}: cmyk re-encode {} >= original {}",
+                    info.id.0, info.id.1, to, info.stream_len
+                ));
+            } else {
+                out.log.push(format!(
+                    "skip obj {} {} ({}, {}): {reason}",
+                    info.id.0,
+                    info.id.1,
+                    info.color,
+                    info.filters.join("+")
+                ));
+            }
+            return out;
+        }
+    };
+
+    // Images made of at most two colors (QR codes, binarized line art
+    // stored as 8-bit) become 1-bit palette images at full resolution:
+    // exact, and nothing to blur.
+    match recompress_two_color(doc, &mut out.staged, info, &decoded, is_soft_mask) {
+        TwoColor::Recompressed { to } => {
+            out.log.push(format!(
+                "obj {} {}: {} -> {} bytes [2-color, lossless]",
+                info.id.0, info.id.1, info.stream_len, to
+            ));
+            out.saved += info.stream_len as i64 - to as i64;
+            out.recompressed += 1;
+            return out;
+        }
+        TwoColor::Larger { to } => {
+            out.log.push(format!(
+                "keep obj {} {}: 2-color lossless {} >= original {}",
+                info.id.0, info.id.1, to, info.stream_len
+            ));
+            return out;
+        }
+        TwoColor::MoreColors => {}
+    }
+    let mut img = decoded;
+    // Colors under fully transparent pixels are never shown, but
+    // resampling and JPEG (of this image and of its mask) spread them
+    // into the visible edge; replace them with nearby visible colors.
+    let bled = bleed_under_soft_mask(doc, info.id, &mut img);
+    let (new_w, new_h) = target_size(info, opts);
+    let resized = new_w != info.width as u32 || new_h != info.height as u32;
+    if resized {
+        img = resize_image(&img, new_w, new_h);
+    }
+
+    // Decide how to treat color: RGB images that are visually grayscale
+    // become single-channel; sharp chroma edges (stamps, colored line art)
+    // disable chroma subsampling, which visibly bleeds there.
+    let mut sharp_chroma = false;
+    let mut mode = "";
+    if let DynamicImage::ImageRgb8(ref rgb) = img {
+        match classify_chroma(rgb) {
+            ChromaClass::Gray => {
+                img = DynamicImage::ImageLuma8(image::imageops::grayscale(&img));
+                mode = " [gray]";
+            }
+            ChromaClass::SharpColor => {
+                sharp_chroma = true;
+                mode = " [4:4:4]";
+            }
+            ChromaClass::SmoothColor => {}
+        }
+    }
+
+    let gray = matches!(img, DynamicImage::ImageLuma8(_));
+    let decoded_components: u8 = if gray { 1 } else { 3 };
+    // If pixel components are preserved, the original ColorSpace (ICC included) can be kept.
+    let keep_colorspace = info.components == Some(decoded_components);
+    // An expanded Indexed image takes its palette's base color space
+    // (ICC profile included), unless it was reduced to gray.
+    let indexed_base = match doc.get_object(info.id) {
+        Ok(Object::Stream(s)) => indexed_palette(doc, &s.dict).ok().flatten(),
+        _ => None,
+    };
+    let is_indexed = indexed_base.is_some();
+    if is_indexed && mode.is_empty() {
+        mode = " [indexed]";
+    }
+    let mode = if bled {
+        format!("{mode} [bled]")
+    } else {
+        mode.to_string()
+    };
+    let new_colorspace = match indexed_base {
+        Some((c, _, base)) if c == decoded_components => Some(base),
+        _ if keep_colorspace => None,
+        _ => Some(Object::Name(if gray {
+            b"DeviceGray".to_vec()
+        } else {
+            b"DeviceRGB".to_vec()
+        })),
+    };
+
+    // Palette images are mostly flat-color art: once resampled, a
+    // lossless Flate encoding of it can beat JPEG, and then it wins.
+    let encoded = if is_indexed && resized {
+        smallest_encoding(&img, opts.jpeg_quality, sharp_chroma)
+    } else {
+        encode_jpeg(&img, opts.jpeg_quality, sharp_chroma)
+            .map(|j| (j, Some(b"DCTDecode".as_slice())))
+    };
+    let Some((jpeg, filter)) = encoded else {
+        out.log.push(format!(
+            "keep obj {} {}: jpeg encode failed or not baseline-conformant",
+            info.id.0, info.id.1
+        ));
+        return out;
+    };
+
+    if jpeg.len() >= info.stream_len {
+        // Recompressing lost; if the original is DCT, still try the
+        // lossless entropy re-optimization before keeping it as-is.
+        if let Some((from, to)) = try_lossless_jpeg_optimize(doc, &mut out.staged, info) {
+            out.log.push(format!(
+                "obj {} {}: {} -> {} bytes [lossless entropy]",
+                info.id.0, info.id.1, from, to
+            ));
+            out.saved += from as i64 - to as i64;
+            out.recompressed += 1;
+        } else {
+            out.log.push(format!(
+                "keep obj {} {}: recompressed {} >= original {}",
+                info.id.0,
+                info.id.1,
+                jpeg.len(),
+                info.stream_len
+            ));
+        }
+        return out;
+    }
+
+    let Some(stream) = out.staged.stream(doc, info.id) else {
+        return out;
+    };
+    let dict = &mut stream.dict;
+    dict.set("Width", img.width() as i64);
+    dict.set("Height", img.height() as i64);
+    dict.set("BitsPerComponent", 8i64);
+    if let Some(cs) = new_colorspace {
+        dict.set("ColorSpace", cs);
+    }
+    match filter {
+        Some(f) => dict.set("Filter", Object::Name(f.to_vec())),
+        None => {
+            dict.remove(b"Filter");
+        }
+    }
+    dict.remove(b"DecodeParms");
+    dict.remove(b"Decode");
+    dict.set("Length", jpeg.len() as i64);
+    stream.set_content(jpeg.clone());
+    stream.allows_compression = false;
+
+    out.log.push(format!(
+        "obj {} {}: {} -> {} bytes{}{}{}",
+        info.id.0,
+        info.id.1,
+        info.stream_len,
+        jpeg.len(),
+        if resized {
+            format!(" (downsampled to {}x{})", img.width(), img.height())
+        } else {
+            String::new()
+        },
+        mode,
+        if filter == Some(b"FlateDecode".as_slice()) {
+            " [flate]"
+        } else {
+            ""
+        }
+    ));
+    out.saved += info.stream_len as i64 - jpeg.len() as i64;
+    out.recompressed += 1;
+    out
+}
+
+/// Run process_image over every image not already written by the /Matte
+/// pass, on several threads, with the same result as one image after
+/// another in `images` order. An image can read other images (its soft
+/// mask, to bleed colors under it; an /Indexed lookup table stored in an
+/// image stream), so images run in batches: see parallel::batches.
+/// Returns the outcomes in order.
+fn process_images(
+    doc: &mut Document,
+    images: &[ImageInfo],
+    opts: &CompressOptions,
+    matte_done: &std::collections::HashMap<ObjectId, MatteHalf>,
+    soft_masks: &std::collections::HashSet<ObjectId>,
+) -> Vec<Option<ImageOutcome>> {
+    let mut outcomes: Vec<Option<ImageOutcome>> = (0..images.len()).map(|_| None).collect();
+    let units: Vec<usize> = (0..images.len())
+        .filter(|&i| !matches!(matte_done.get(&images[i].id), Some(MatteHalf::Written)))
+        .collect();
+    let batches = parallel::batches(
+        &units,
+        |i| parallel::reachable(doc, images[i].id, parallel::REACH_LIMIT),
+        |i| vec![images[i].id],
+    );
+    for batch in batches {
+        let snapshot: &Document = doc;
+        let results = parallel::map_bounded(
+            &batch,
+            |i| work_pixels(snapshot, &images[i]),
+            |i| {
+                let info = &images[i];
+                process_image(
+                    snapshot,
+                    info,
+                    opts,
+                    matte_done.get(&info.id),
+                    soft_masks.contains(&info.id),
+                )
+            },
+        );
+        for (i, mut outcome) in batch.into_iter().zip(results) {
+            std::mem::take(&mut outcome.staged).apply(doc);
+            outcomes[i] = Some(outcome);
+        }
+    }
+    outcomes
+}
+
+/// Roughly how many pixels processing the image may hold at once: its own
+/// and its soft mask's (decoded to bleed colors under it, or as the other
+/// half of a /Matte pair). See stream_pixels.
+pub(crate) fn work_pixels(doc: &Document, info: &ImageInfo) -> u64 {
+    let Some(Object::Stream(s)) = doc.objects.get(&info.id) else {
+        return 1;
+    };
+    let mask = match s.dict.get(b"SMask") {
+        Ok(Object::Reference(m)) => match doc.objects.get(m) {
+            Some(Object::Stream(m)) => stream_pixels(m),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    stream_pixels(s).saturating_add(mask)
+}
+
+/// An image stream's declared size, or a JPEG's own frame size when larger
+/// (the lossless optimizer allocates from the frame header, which need not
+/// match the dictionary). A JPEG inside another filter is not inspected
+/// and counts as the most an image may have.
+fn stream_pixels(s: &lopdf::Stream) -> u64 {
+    let side = |key: &[u8]| dict_int(&s.dict, key).unwrap_or(1).max(1) as u64;
+    let declared = side(b"Width").saturating_mul(side(b"Height"));
+    let filters = filter_names(&s.dict);
+    if !filters.iter().any(|f| f == "DCTDecode") {
+        return declared;
+    }
+    if filters.len() > 1 {
+        return decode::MAX_PIXELS;
+    }
+    match smallpeg::jpeg_info(&s.content) {
+        Some(j) => declared.max(j.width as u64 * j.height as u64),
+        None => declared,
+    }
 }
 
 /// Refuse documents that compression would damage rather than shrink.
@@ -1001,5 +1112,78 @@ mod signature_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn an_image_used_as_another_images_palette_is_read_unchanged() {
+        // Image 1 is also the /Indexed lookup table of image 2. One image
+        // after another, image 2 reads image 1 after it was rewritten; the
+        // threaded pass must do the same.
+        let n = 64usize;
+        let mut doc = Document::with_version("1.7");
+        let rgb: Vec<u8> = (0..n * n * 3).map(|i| (i % 251) as u8).collect();
+        let a = doc.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => n as i64,
+                "Height" => n as i64, "BitsPerComponent" => 8, "ColorSpace" => "DeviceRGB",
+            },
+            rgb,
+        ));
+        let indices: Vec<u8> = (0..n * n).map(|i| (i % 2) as u8).collect();
+        let b = doc.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => n as i64,
+                "Height" => n as i64, "BitsPerComponent" => 8,
+                "ColorSpace" => vec!["Indexed".into(), "DeviceRGB".into(), 1.into(), a.into()],
+            },
+            indices,
+        ));
+        let content = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            b"q 64 0 0 64 0 0 cm /A Do Q q 64 0 0 64 0 0 cm /B Do Q".to_vec(),
+        ));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 64.into(), 64.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "A" => a, "B" => b } },
+        });
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let (_, stats) = compress_bytes(&bytes, &CompressOptions::default()).unwrap();
+        assert!(stats.log[0].starts_with("obj 1 0: "), "{:?}", stats.log);
+        assert!(
+            stats.log[1].starts_with("skip obj 2 0") && stats.log[1].contains("lookup table"),
+            "{:?}",
+            stats.log
+        );
+    }
+
+    #[test]
+    fn work_pixels_counts_the_soft_mask() {
+        // A 1x1 image with a 10000x10000 soft mask weighs as much as the
+        // mask, which bleeding or the /Matte pass decodes.
+        let mut doc = Document::with_version("1.7");
+        let mask = doc.add_object(lopdf::Stream::new(
+            dictionary! { "Subtype" => "Image", "Width" => 10_000, "Height" => 10_000 },
+            vec![],
+        ));
+        let image = doc.add_object(lopdf::Stream::new(
+            dictionary! { "Subtype" => "Image", "Width" => 1, "Height" => 1, "SMask" => mask },
+            vec![],
+        ));
+        let info = collect_images(&doc)
+            .into_iter()
+            .find(|i| i.id == image)
+            .unwrap();
+        assert_eq!(work_pixels(&doc, &info), 100_000_001);
     }
 }

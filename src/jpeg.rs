@@ -10,6 +10,7 @@ use crate::decode::{
 };
 use crate::images::{ImageInfo, target_size};
 use crate::limits::inflate;
+use crate::recompress::Staged;
 use crate::{CompressOptions, dict_int, resolve};
 
 /// Is this JPEG progressive (SOF2)? `None` for malformed or exotic
@@ -67,7 +68,8 @@ fn ycck_if_adobe(adobe: Option<smallpeg::AdobeTransform>) -> Option<smallpeg::Ad
 /// Anything that would change how the samples are interpreted at the PDF
 /// level (a /Decode array, /DecodeParms, a color-key mask) is left alone.
 pub(crate) fn recompress_cmyk_jpeg(
-    doc: &mut Document,
+    doc: &Document,
+    staged: &mut Staged,
     info: &ImageInfo,
     opts: &CompressOptions,
 ) -> CmykOutcome {
@@ -210,7 +212,7 @@ pub(crate) fn recompress_cmyk_jpeg(
     if jpeg.len() >= info.stream_len {
         return CmykOutcome::Larger { to: jpeg.len() };
     }
-    let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
+    let Some(stream) = staged.stream(doc, info.id) else {
         return CmykOutcome::NotApplicable;
     };
     // ColorSpace (ICC profile included) stays: the samples are still CMYK.
@@ -248,7 +250,8 @@ pub(crate) fn recompress_cmyk_jpeg(
 /// Enforces the baseline-only policy for PDF embedding: a progressive result
 /// is only accepted when the input was already progressive.
 pub(crate) fn try_lossless_jpeg_optimize(
-    doc: &mut Document,
+    doc: &Document,
+    staged: &mut Staged,
     info: &ImageInfo,
 ) -> Option<(usize, usize)> {
     let filters: Vec<&str> = info.filters.iter().map(|s| s.as_str()).collect();
@@ -297,9 +300,7 @@ pub(crate) fn try_lossless_jpeg_optimize(
     if optimized.len() >= stored_len {
         return None;
     }
-    let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
-        return None;
-    };
+    let stream = staged.stream(doc, info.id)?;
     if unwrapped_flate {
         stream
             .dict
