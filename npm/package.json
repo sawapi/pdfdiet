@@ -1,6 +1,6 @@
 {
   "name": "@sawapi/pdfdiet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Put PDFs on a diet: measured-DPI image downsampling plus lossless font and structure optimization. Permissively-licensed CLI + WASM library for Node and the browser.",
   "license": "(MIT OR Apache-2.0)",
   "bin": {
