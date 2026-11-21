@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- smallpeg 0.16. Output is unchanged.
 - A document whose object stream cannot be read (it does not parse, or
   inflates past the limit) is no longer compressed. The loader drops such
   a stream with every object in it, so the output would have lost them,
