@@ -12,6 +12,7 @@ use crate::decode::{colorspace_components, decode_samples, indexed_palette};
 use crate::images::{ImageInfo, target_size};
 use crate::jpeg::{ChromaClass, classify_chroma, encode_jpeg};
 use crate::limits::{MAX_INFLATE, inflate};
+use crate::parallel::Reads;
 use crate::{CompressOptions, CompressStats, filter_names, resolve};
 
 /// Downsample and recompress premultiplied-alpha (/Matte) pairs as pairs.
@@ -37,7 +38,6 @@ pub(crate) fn recompress_matte_pairs(
     opts: &CompressOptions,
     stats: &mut CompressStats,
 ) -> HashMap<ObjectId, MatteHalf> {
-    let mut done = HashMap::new();
     // How many images point at each soft mask: a shared mask cannot change
     // size without breaking its other parents.
     let mut mask_refs: HashMap<ObjectId, usize> = HashMap::new();
@@ -48,127 +48,215 @@ pub(crate) fn recompress_matte_pairs(
             *mask_refs.entry(*sid).or_default() += 1;
         }
     }
-    for info in images {
-        let Some(mask_id) = matte_pair_mask(doc, info.id, &mask_refs) else {
-            continue;
-        };
-        let Some(mask_len) = (match doc.get_object(mask_id) {
-            Ok(Object::Stream(s)) => Some(s.content.len()),
-            _ => None,
-        }) else {
-            continue;
-        };
-        let (Ok(parent), Ok(mask)) = (decode_samples(doc, info.id), decode_samples(doc, mask_id))
-        else {
-            continue;
-        };
-        let parent_components = match parent {
-            DynamicImage::ImageRgb8(_) => 3,
-            DynamicImage::ImageLuma8(_) => 1,
-            _ => continue,
-        };
-        if !matches!(mask, DynamicImage::ImageLuma8(_))
-            || matte_len(doc, mask_id) != Some(parent_components)
-            || (parent.width(), parent.height()) != (mask.width(), mask.height())
-            || parent.width() as i64 != info.width
-            || parent.height() as i64 != info.height
-        {
-            continue;
-        }
-        let (w, h) = target_size(info, opts);
-        let resized = (w, h) != (parent.width(), parent.height());
-        let (parent, mask) = if resized {
-            (resize_image(&parent, w, h), resize_image(&mask, w, h))
-        } else {
-            (parent, mask)
-        };
-        let sharp = matches!(&parent, DynamicImage::ImageRgb8(rgb)
-            if matches!(classify_chroma(rgb), ChromaClass::SharpColor));
-        let (Some(new_parent), Some(new_mask)) = (
-            smallest_encoding(&parent, opts.jpeg_quality, sharp),
-            smallest_encoding(&mask, opts.jpeg_quality, false),
-        ) else {
-            continue;
-        };
-        let halves = [
-            (info.id, info.stream_len, new_parent),
-            (mask_id, mask_len, new_mask),
-        ];
-        let keep: Vec<bool> = if resized {
-            let before = info.stream_len + mask_len;
-            let after = halves[0].2.0.len() + halves[1].2.0.len();
-            if after >= before {
-                stats.log.push(format!(
-                    "keep obj {} {} and its /Matte mask {} {}: downsampled pair {} >= original {}",
-                    info.id.0, info.id.1, mask_id.0, mask_id.1, after, before
-                ));
-                done.insert(info.id, MatteHalf::Kept);
-                done.insert(mask_id, MatteHalf::Kept);
-                continue;
-            }
-            vec![true, true]
-        } else {
-            halves
-                .iter()
-                .map(|(_, from, (data, _))| data.len() < *from)
-                .collect()
-        };
-        for ((id, from, (data, filter)), write) in halves.into_iter().zip(keep) {
-            if !write {
-                stats.log.push(format!(
-                    "keep obj {} {}: /Matte pair half, re-encode {} >= original {}",
-                    id.0,
-                    id.1,
-                    data.len(),
-                    from
-                ));
-                done.insert(id, MatteHalf::Kept);
-                continue;
-            }
-            let Some(Object::Stream(stream)) = doc.objects.get_mut(&id) else {
-                continue;
-            };
-            // ColorSpace stays (components are unchanged), and so do /Matte
-            // and /SMask: the pair still refers to each other the same way.
-            let dict = &mut stream.dict;
-            dict.remove(b"DecodeParms");
-            dict.remove(b"Decode");
-            dict.set("Width", w as i64);
-            dict.set("Height", h as i64);
-            dict.set("BitsPerComponent", 8i64);
-            match filter {
-                Some(f) => dict.set("Filter", Object::Name(f.to_vec())),
-                None => {
-                    dict.remove(b"Filter");
+    // Whether an image is a pair's parent depends only on keys no pair
+    // rewrites (/Matte, /SMask, /Mask) and on mask_refs, so it is decided
+    // up front. Pairs run on several threads, in batches that give the
+    // same result as one after another (see parallel::batches): a pair
+    // writes its two halves and may read anything they refer to.
+    let pair_mask: Vec<Option<ObjectId>> = images
+        .iter()
+        .map(|info| matte_pair_mask(doc, info.id, &mask_refs))
+        .collect();
+    let units: Vec<usize> = (0..images.len())
+        .filter(|&i| pair_mask[i].is_some())
+        .collect();
+    let limit = crate::parallel::REACH_LIMIT;
+    let batches = crate::parallel::batches(
+        &units,
+        |i| {
+            let mask = pair_mask[i].expect("a pair");
+            match (
+                crate::parallel::reachable(doc, images[i].id, limit),
+                crate::parallel::reachable(doc, mask, limit),
+            ) {
+                (Reads::Objects(mut a), Reads::Objects(b)) => {
+                    a.extend(b);
+                    Reads::Objects(a)
                 }
+                _ => Reads::Everything,
             }
-            dict.set("Length", data.len() as i64);
-            let to = data.len();
-            stream.set_content(data);
-            stream.allows_compression = false;
-            stats.log.push(format!(
-                "obj {} {}: {} -> {} bytes{} [matte pair{}]",
-                id.0,
-                id.1,
-                from,
-                to,
-                if resized {
-                    format!(" (downsampled to {w}x{h})")
-                } else {
-                    String::new()
-                },
-                if filter == Some(b"FlateDecode".as_slice()) {
-                    ", flate"
-                } else {
-                    ""
-                }
-            ));
-            stats.stream_bytes_saved += from as i64 - to as i64;
-            stats.images_recompressed += 1;
-            done.insert(id, MatteHalf::Written);
+        },
+        |i| vec![images[i].id, pair_mask[i].expect("a pair")],
+    );
+    let mut done = HashMap::new();
+    for batch in batches {
+        let snapshot: &Document = doc;
+        let outcomes = crate::parallel::map_bounded(
+            &batch,
+            |i| crate::work_pixels(snapshot, &images[i]),
+            |i| matte_pair(snapshot, &images[i], opts, &mask_refs),
+        );
+        for outcome in outcomes {
+            outcome.staged.apply(doc);
+            stats.log.extend(outcome.log);
+            stats.stream_bytes_saved += outcome.saved;
+            stats.images_recompressed += outcome.recompressed;
+            done.extend(outcome.done);
         }
     }
     done
+}
+
+/// What recompress_matte_pairs did with one parent image and its mask.
+#[derive(Default)]
+struct PairOutcome {
+    log: Vec<String>,
+    saved: i64,
+    recompressed: usize,
+    done: Vec<(ObjectId, MatteHalf)>,
+    staged: Staged,
+}
+
+/// One /Matte pair, if `info` is the parent of one; reads the document only.
+fn matte_pair(
+    doc: &Document,
+    info: &ImageInfo,
+    opts: &CompressOptions,
+    mask_refs: &HashMap<ObjectId, usize>,
+) -> PairOutcome {
+    let mut out = PairOutcome::default();
+    let Some(mask_id) = matte_pair_mask(doc, info.id, mask_refs) else {
+        return out;
+    };
+    let Some(mask_len) = (match doc.get_object(mask_id) {
+        Ok(Object::Stream(s)) => Some(s.content.len()),
+        _ => None,
+    }) else {
+        return out;
+    };
+    let (Ok(parent), Ok(mask)) = (decode_samples(doc, info.id), decode_samples(doc, mask_id))
+    else {
+        return out;
+    };
+    let parent_components = match parent {
+        DynamicImage::ImageRgb8(_) => 3,
+        DynamicImage::ImageLuma8(_) => 1,
+        _ => return out,
+    };
+    if !matches!(mask, DynamicImage::ImageLuma8(_))
+        || matte_len(doc, mask_id) != Some(parent_components)
+        || (parent.width(), parent.height()) != (mask.width(), mask.height())
+        || parent.width() as i64 != info.width
+        || parent.height() as i64 != info.height
+    {
+        return out;
+    }
+    let (w, h) = target_size(info, opts);
+    let resized = (w, h) != (parent.width(), parent.height());
+    let (parent, mask) = if resized {
+        (resize_image(&parent, w, h), resize_image(&mask, w, h))
+    } else {
+        (parent, mask)
+    };
+    let sharp = matches!(&parent, DynamicImage::ImageRgb8(rgb)
+        if matches!(classify_chroma(rgb), ChromaClass::SharpColor));
+    let (Some(new_parent), Some(new_mask)) = (
+        smallest_encoding(&parent, opts.jpeg_quality, sharp),
+        smallest_encoding(&mask, opts.jpeg_quality, false),
+    ) else {
+        return out;
+    };
+    let halves = [
+        (info.id, info.stream_len, new_parent),
+        (mask_id, mask_len, new_mask),
+    ];
+    let keep: Vec<bool> = if resized {
+        let before = info.stream_len + mask_len;
+        let after = halves[0].2.0.len() + halves[1].2.0.len();
+        if after >= before {
+            out.log.push(format!(
+                "keep obj {} {} and its /Matte mask {} {}: downsampled pair {} >= original {}",
+                info.id.0, info.id.1, mask_id.0, mask_id.1, after, before
+            ));
+            out.done.push((info.id, MatteHalf::Kept));
+            out.done.push((mask_id, MatteHalf::Kept));
+            return out;
+        }
+        vec![true, true]
+    } else {
+        halves
+            .iter()
+            .map(|(_, from, (data, _))| data.len() < *from)
+            .collect()
+    };
+    for ((id, from, (data, filter)), write) in halves.into_iter().zip(keep) {
+        if !write {
+            out.log.push(format!(
+                "keep obj {} {}: /Matte pair half, re-encode {} >= original {}",
+                id.0,
+                id.1,
+                data.len(),
+                from
+            ));
+            out.done.push((id, MatteHalf::Kept));
+            continue;
+        }
+        let Some(stream) = out.staged.stream(doc, id) else {
+            continue;
+        };
+        // ColorSpace stays (components are unchanged), and so do /Matte
+        // and /SMask: the pair still refers to each other the same way.
+        let dict = &mut stream.dict;
+        dict.remove(b"DecodeParms");
+        dict.remove(b"Decode");
+        dict.set("Width", w as i64);
+        dict.set("Height", h as i64);
+        dict.set("BitsPerComponent", 8i64);
+        match filter {
+            Some(f) => dict.set("Filter", Object::Name(f.to_vec())),
+            None => {
+                dict.remove(b"Filter");
+            }
+        }
+        dict.set("Length", data.len() as i64);
+        let to = data.len();
+        stream.set_content(data);
+        stream.allows_compression = false;
+        out.log.push(format!(
+            "obj {} {}: {} -> {} bytes{} [matte pair{}]",
+            id.0,
+            id.1,
+            from,
+            to,
+            if resized {
+                format!(" (downsampled to {w}x{h})")
+            } else {
+                String::new()
+            },
+            if filter == Some(b"FlateDecode".as_slice()) {
+                ", flate"
+            } else {
+                ""
+            }
+        ));
+        out.saved += from as i64 - to as i64;
+        out.recompressed += 1;
+        out.done.push((id, MatteHalf::Written));
+    }
+    out
+}
+
+/// Stream replacements computed against an unchanged document and written
+/// back afterwards, so that images can be processed on several threads.
+#[derive(Default)]
+pub(crate) struct Staged(Vec<(ObjectId, lopdf::Stream)>);
+
+impl Staged {
+    /// A copy of stream `id` to modify in place of the original.
+    pub(crate) fn stream(&mut self, doc: &Document, id: ObjectId) -> Option<&mut lopdf::Stream> {
+        let Some(Object::Stream(s)) = doc.objects.get(&id) else {
+            return None;
+        };
+        self.0.push((id, s.clone()));
+        self.0.last_mut().map(|(_, s)| s)
+    }
+
+    /// Write the replacements into the document.
+    pub(crate) fn apply(self, doc: &mut Document) {
+        for (id, s) in self.0 {
+            doc.objects.insert(id, Object::Stream(s));
+        }
+    }
 }
 
 /// What recompress_matte_pairs did with one half of a pair.
@@ -303,7 +391,8 @@ pub(crate) enum TwoColor {
 /// the 8-bit original, and failed to decode at one zoom level where the
 /// original did. Flate on runs of identical bytes is small anyway.
 pub(crate) fn recompress_two_color(
-    doc: &mut Document,
+    doc: &Document,
+    staged: &mut Staged,
     info: &ImageInfo,
     img: &DynamicImage,
     is_soft_mask: bool,
@@ -365,7 +454,7 @@ pub(crate) fn recompress_two_color(
     if data.len() >= info.stream_len {
         return TwoColor::Larger { to: data.len() };
     }
-    let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
+    let Some(stream) = staged.stream(doc, info.id) else {
         return TwoColor::MoreColors;
     };
     let dict = &mut stream.dict;
@@ -508,7 +597,11 @@ pub(crate) enum BilevelOutcome {
 /// ColorSpace is kept, and CCITTFaxDecode's default BlackIs1 = false matches
 /// the 1-bit gray convention (sample 0 = black), so no Decode array is
 /// needed on the result either.
-pub(crate) fn recompress_bilevel(doc: &mut Document, info: &ImageInfo) -> BilevelOutcome {
+pub(crate) fn recompress_bilevel(
+    doc: &Document,
+    staged: &mut Staged,
+    info: &ImageInfo,
+) -> BilevelOutcome {
     let Ok(Object::Stream(stream)) = doc.get_object(info.id) else {
         return BilevelOutcome::Unsupported;
     };
@@ -560,7 +653,7 @@ pub(crate) fn recompress_bilevel(doc: &mut Document, info: &ImageInfo) -> Bileve
         return BilevelOutcome::Larger;
     }
 
-    let Some(Object::Stream(stream)) = doc.objects.get_mut(&info.id) else {
+    let Some(stream) = staged.stream(doc, info.id) else {
         return BilevelOutcome::Unsupported;
     };
     let to = g4.len();
@@ -589,7 +682,7 @@ mod tests {
         // 65535 every other image path allows is refused before inflating.
         let w = 70_000usize;
         let data = vec![0x55u8; w / 8];
-        let (mut doc, id) = doc_with_image(
+        let (doc, id) = doc_with_image(
             |d| {
                 d.set("Width", w as i64);
                 d.set("Height", 1i64);
@@ -610,7 +703,7 @@ mod tests {
             extent: None,
         };
         assert!(matches!(
-            recompress_bilevel(&mut doc, &info),
+            recompress_bilevel(&doc, &mut Staged::default(), &info),
             BilevelOutcome::Unsupported
         ));
     }
@@ -720,6 +813,30 @@ mod tests {
     }
 
     #[test]
+    fn matte_pair_half_that_does_not_shrink_keeps_the_other() {
+        // Drawn at its own size, so each half is replaced only if it shrinks:
+        // the parent (claimed to be stored in one byte) stays, the mask is
+        // still re-encoded.
+        let (mut doc, id, mask_id, mut info) = matte_pair_doc();
+        info.extent = None;
+        info.stream_len = 1;
+        let mask_before = match doc.get_object(mask_id) {
+            Ok(Object::Stream(s)) => s.content.len(),
+            _ => panic!(),
+        };
+        let mut stats = empty_stats();
+        let done =
+            recompress_matte_pairs(&mut doc, &[info], &CompressOptions::default(), &mut stats);
+        assert!(matches!(done.get(&id), Some(MatteHalf::Kept)));
+        assert!(matches!(done.get(&mask_id), Some(MatteHalf::Written)));
+        let Ok(Object::Stream(m)) = doc.get_object(mask_id) else {
+            panic!()
+        };
+        assert!(m.content.len() < mask_before);
+        assert_eq!(stats.images_recompressed, 1);
+    }
+
+    #[test]
     fn shared_matte_mask_is_left_alone() {
         let (mut doc, id, mask_id, info) = matte_pair_doc();
         let mut other = Dictionary::new();
@@ -768,10 +885,12 @@ mod tests {
             extent: None,
         };
         let img = decode_image(&doc, id).unwrap();
+        let mut staged = Staged::default();
         assert!(matches!(
-            recompress_two_color(&mut doc, &info, &img, false),
+            recompress_two_color(&doc, &mut staged, &info, &img, false),
             TwoColor::Recompressed { .. }
         ));
+        staged.apply(&mut doc);
         // Decoding the rewritten stream through its palette gives back
         // exactly the original pixels.
         let Ok(Object::Stream(s)) = doc.get_object(id) else {
@@ -789,7 +908,7 @@ mod tests {
         // A third color anywhere disqualifies.
         let mut three = rgb.clone();
         three[0] = 7;
-        let (mut doc, id) = doc_with_image(
+        let (doc, id) = doc_with_image(
             |d| {
                 d.set("Width", n as i64);
                 d.set("Height", n as i64);
@@ -798,7 +917,13 @@ mod tests {
         );
         let img = decode_image(&doc, id).unwrap();
         assert!(matches!(
-            recompress_two_color(&mut doc, &info_for(id, n, three.len()), &img, false),
+            recompress_two_color(
+                &doc,
+                &mut Staged::default(),
+                &info_for(id, n, three.len()),
+                &img,
+                false
+            ),
             TwoColor::MoreColors
         ));
     }
