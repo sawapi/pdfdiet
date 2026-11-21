@@ -2,7 +2,7 @@
 //! two-color and bilevel images, lossless candidates, and filling pixels
 //! hidden under a soft mask.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use image::DynamicImage;
 use lopdf::{Dictionary, Document, Object, ObjectId};
@@ -35,6 +35,7 @@ use crate::{CompressOptions, CompressStats, filter_names, resolve};
 pub(crate) fn recompress_matte_pairs(
     doc: &mut Document,
     images: &[ImageInfo],
+    lookups: &HashSet<ObjectId>,
     opts: &CompressOptions,
     stats: &mut CompressStats,
 ) -> HashMap<ObjectId, MatteHalf> {
@@ -56,6 +57,8 @@ pub(crate) fn recompress_matte_pairs(
     let pair_mask: Vec<Option<ObjectId>> = images
         .iter()
         .map(|info| matte_pair_mask(doc, info.id, &mask_refs))
+        // A mask that is also a lookup table must keep its bytes.
+        .map(|mask| mask.filter(|m| !lookups.contains(m)))
         .collect();
     let units: Vec<usize> = (0..images.len())
         .filter(|&i| pair_mask[i].is_some())
@@ -786,8 +789,13 @@ mod tests {
     fn matte_pair_is_resampled_together_and_stays_rgb() {
         let (mut doc, id, mask_id, info) = matte_pair_doc();
         let mut stats = empty_stats();
-        let done =
-            recompress_matte_pairs(&mut doc, &[info], &CompressOptions::default(), &mut stats);
+        let done = recompress_matte_pairs(
+            &mut doc,
+            &[info],
+            &HashSet::new(),
+            &CompressOptions::default(),
+            &mut stats,
+        );
         assert!(matches!(done.get(&id), Some(MatteHalf::Written)));
         assert!(matches!(done.get(&mask_id), Some(MatteHalf::Written)));
         let dict = |o| match doc.get_object(o) {
@@ -825,8 +833,13 @@ mod tests {
             _ => panic!(),
         };
         let mut stats = empty_stats();
-        let done =
-            recompress_matte_pairs(&mut doc, &[info], &CompressOptions::default(), &mut stats);
+        let done = recompress_matte_pairs(
+            &mut doc,
+            &[info],
+            &HashSet::new(),
+            &CompressOptions::default(),
+            &mut stats,
+        );
         assert!(matches!(done.get(&id), Some(MatteHalf::Kept)));
         assert!(matches!(done.get(&mask_id), Some(MatteHalf::Written)));
         let Ok(Object::Stream(m)) = doc.get_object(mask_id) else {
@@ -844,8 +857,13 @@ mod tests {
         other.set("SMask", Object::Reference(mask_id));
         doc.add_object(lopdf::Stream::new(other, vec![]));
         let mut stats = empty_stats();
-        let done =
-            recompress_matte_pairs(&mut doc, &[info], &CompressOptions::default(), &mut stats);
+        let done = recompress_matte_pairs(
+            &mut doc,
+            &[info],
+            &HashSet::new(),
+            &CompressOptions::default(),
+            &mut stats,
+        );
         assert!(done.is_empty());
         let Ok(Object::Stream(s)) = doc.get_object(id) else {
             panic!()

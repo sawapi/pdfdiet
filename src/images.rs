@@ -1,7 +1,7 @@
 //! Finding the images in a document and the largest size each one is drawn
 //! at on any page.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
@@ -192,6 +192,40 @@ pub(crate) fn collect_images(doc: &Document) -> Vec<ImageInfo> {
         });
     }
     images
+}
+
+/// Streams serving as the lookup table of an /Indexed color space anywhere
+/// in the document (an image's, a resource dictionary's, a shading's...).
+/// Such a stream's decoded bytes are colors, not pixels: an image that is
+/// also some color space's lookup table must keep them as they are.
+pub(crate) fn indexed_lookups(doc: &Document) -> HashSet<ObjectId> {
+    let mut out = HashSet::new();
+    let mut stack: Vec<&Object> = doc.objects.values().collect();
+    while let Some(o) = stack.pop() {
+        match o {
+            Object::Array(a) => {
+                if a.len() == 4
+                    && matches!(&a[0], Object::Name(n) if n == b"Indexed" || n == b"I")
+                    && let Object::Reference(r) = &a[3]
+                {
+                    // Through chains of references, as readers resolve it.
+                    let mut id = *r;
+                    for _ in 0..32 {
+                        match doc.objects.get(&id) {
+                            Some(Object::Reference(next)) => id = *next,
+                            _ => break,
+                        }
+                    }
+                    out.insert(id);
+                }
+                stack.extend(a.iter());
+            }
+            Object::Dictionary(d) => stack.extend(d.iter().map(|(_, v)| v)),
+            Object::Stream(s) => stack.extend(s.dict.iter().map(|(_, v)| v)),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Interpret content streams to measure the physical size at which each image
