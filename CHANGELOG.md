@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Images are processed on several threads (up to 8) in the native
+  library and CLI, with the same output as before: about twice as fast
+  on image-heavy documents. Images run together only while their pixels
+  add up to at most 100 million, the limit for a single image, so peak
+  memory stays close to what one large image already needs. The
+  WebAssembly build is unchanged (one thread).
 - smallpeg 0.16. Output is unchanged.
 - A document whose object stream cannot be read (it does not parse, or
   inflates past the limit) is no longer compressed. The loader drops such
