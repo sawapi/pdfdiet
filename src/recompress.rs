@@ -83,7 +83,7 @@ pub(crate) fn recompress_matte_pairs(
         let snapshot: &Document = doc;
         let outcomes = crate::parallel::map_bounded(
             &batch,
-            |i| 2 * crate::work_pixels(snapshot, &images[i]),
+            |i| crate::work_pixels(snapshot, &images[i]),
             |i| matte_pair(snapshot, &images[i], opts, &mask_refs),
         );
         for outcome in outcomes {

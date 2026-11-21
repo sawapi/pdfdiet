@@ -811,22 +811,40 @@ fn process_images(
     outcomes
 }
 
-/// Roughly how many pixels processing the image may hold at once: its
-/// declared size, or a JPEG's own frame size when larger (the lossless
-/// optimizer allocates from the frame header, which need not match the
-/// dictionary). A JPEG inside another filter is not inspected and counts
-/// as the most an image may have.
+/// Roughly how many pixels processing the image may hold at once: its own
+/// and its soft mask's (decoded to bleed colors under it, or as the other
+/// half of a /Matte pair). See stream_pixels.
 pub(crate) fn work_pixels(doc: &Document, info: &ImageInfo) -> u64 {
-    let declared = (info.width.max(1) as u64).saturating_mul(info.height.max(1) as u64);
-    if !info.filters.iter().any(|f| f == "DCTDecode") {
+    let Some(Object::Stream(s)) = doc.objects.get(&info.id) else {
+        return 1;
+    };
+    let mask = match s.dict.get(b"SMask") {
+        Ok(Object::Reference(m)) => match doc.objects.get(m) {
+            Some(Object::Stream(m)) => stream_pixels(m),
+            _ => 0,
+        },
+        _ => 0,
+    };
+    stream_pixels(s).saturating_add(mask)
+}
+
+/// An image stream's declared size, or a JPEG's own frame size when larger
+/// (the lossless optimizer allocates from the frame header, which need not
+/// match the dictionary). A JPEG inside another filter is not inspected
+/// and counts as the most an image may have.
+fn stream_pixels(s: &lopdf::Stream) -> u64 {
+    let side = |key: &[u8]| dict_int(&s.dict, key).unwrap_or(1).max(1) as u64;
+    let declared = side(b"Width").saturating_mul(side(b"Height"));
+    let filters = filter_names(&s.dict);
+    if !filters.iter().any(|f| f == "DCTDecode") {
         return declared;
     }
-    match (info.filters.len(), doc.objects.get(&info.id)) {
-        (1, Some(Object::Stream(s))) => match smallpeg::jpeg_info(&s.content) {
-            Some(j) => declared.max(j.width as u64 * j.height as u64),
-            None => declared,
-        },
-        _ => decode::MAX_PIXELS,
+    if filters.len() > 1 {
+        return decode::MAX_PIXELS;
+    }
+    match smallpeg::jpeg_info(&s.content) {
+        Some(j) => declared.max(j.width as u64 * j.height as u64),
+        None => declared,
     }
 }
 
@@ -1147,5 +1165,25 @@ mod signature_tests {
             "{:?}",
             stats.log
         );
+    }
+
+    #[test]
+    fn work_pixels_counts_the_soft_mask() {
+        // A 1x1 image with a 10000x10000 soft mask weighs as much as the
+        // mask, which bleeding or the /Matte pass decodes.
+        let mut doc = Document::with_version("1.7");
+        let mask = doc.add_object(lopdf::Stream::new(
+            dictionary! { "Subtype" => "Image", "Width" => 10_000, "Height" => 10_000 },
+            vec![],
+        ));
+        let image = doc.add_object(lopdf::Stream::new(
+            dictionary! { "Subtype" => "Image", "Width" => 1, "Height" => 1, "SMask" => mask },
+            vec![],
+        ));
+        let info = collect_images(&doc)
+            .into_iter()
+            .find(|i| i.id == image)
+            .unwrap();
+        assert_eq!(work_pixels(&doc, &info), 100_000_001);
     }
 }

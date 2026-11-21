@@ -8,8 +8,8 @@ use lopdf::{Document, Object, ObjectId};
 
 use crate::decode::MAX_PIXELS;
 
-/// Most objects followed when listing what an image may read.
-pub(crate) const REACH_LIMIT: usize = 4096;
+/// Most references followed when listing what an image may read.
+pub(crate) const REACH_LIMIT: usize = 1024;
 
 /// Most worker threads used, whatever the machine has.
 const MAX_WORKERS: usize = 8;
@@ -145,20 +145,22 @@ pub(crate) fn batches(
 }
 
 /// Every object reachable through references from object `id` (itself
-/// included), not looking inside stream contents; Everything past `limit`.
+/// included), not looking inside stream contents. Following more than
+/// `limit` references in all (repeats included, so the work stays bounded
+/// however wide a shared object is) gives Everything.
 pub(crate) fn reachable(doc: &Document, id: ObjectId, limit: usize) -> Reads {
     let mut seen: HashSet<ObjectId> = HashSet::from([id]);
     let mut stack = vec![id];
+    let mut budget = limit;
     while let Some(next) = stack.pop() {
         let mut refs = Vec::new();
-        if let Some(o) = doc.objects.get(&next) {
-            collect_refs(o, &mut refs);
+        if let Some(o) = doc.objects.get(&next)
+            && !collect_refs(o, &mut refs, &mut budget)
+        {
+            return Reads::Everything;
         }
         for r in refs {
             if seen.insert(r) {
-                if seen.len() > limit {
-                    return Reads::Everything;
-                }
                 stack.push(r);
             }
         }
@@ -166,13 +168,22 @@ pub(crate) fn reachable(doc: &Document, id: ObjectId, limit: usize) -> Reads {
     Reads::Objects(seen)
 }
 
-fn collect_refs(o: &Object, out: &mut Vec<ObjectId>) {
+/// Push the references in `o` to `out`, charging one unit of `budget` per
+/// reference; false once the budget runs out.
+fn collect_refs(o: &Object, out: &mut Vec<ObjectId>, budget: &mut usize) -> bool {
     match o {
-        Object::Reference(r) => out.push(*r),
-        Object::Array(a) => a.iter().for_each(|x| collect_refs(x, out)),
-        Object::Dictionary(d) => d.iter().for_each(|(_, x)| collect_refs(x, out)),
-        Object::Stream(s) => s.dict.iter().for_each(|(_, x)| collect_refs(x, out)),
-        _ => {}
+        Object::Reference(r) => {
+            if *budget == 0 {
+                return false;
+            }
+            *budget -= 1;
+            out.push(*r);
+            true
+        }
+        Object::Array(a) => a.iter().all(|x| collect_refs(x, out, budget)),
+        Object::Dictionary(d) => d.iter().all(|(_, x)| collect_refs(x, out, budget)),
+        Object::Stream(s) => s.dict.iter().all(|(_, x)| collect_refs(x, out, budget)),
+        _ => true,
     }
 }
 
@@ -209,20 +220,46 @@ mod tests {
 
     #[test]
     fn a_panicking_item_does_not_hang_the_others() {
-        let items: Vec<usize> = (0..4).collect();
-        let result = std::panic::catch_unwind(|| {
-            map_bounded(
-                &items,
-                |_| MAX_PIXELS,
-                |i| {
-                    if i == 0 {
-                        panic!("boom");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                },
-            )
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let items: Vec<usize> = (0..4).collect();
+            let result = std::panic::catch_unwind(|| {
+                map_bounded(
+                    &items,
+                    |_| MAX_PIXELS,
+                    |i| {
+                        if i == 0 {
+                            panic!("boom");
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    },
+                )
+            });
+            let _ = tx.send(result.is_err());
         });
-        assert!(result.is_err());
+        let panicked = rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("map_bounded hung after a panic");
+        assert!(panicked);
+    }
+
+    #[test]
+    fn reachable_work_is_bounded_by_references_followed() {
+        // Every image refers to one wide array: the walk stops after
+        // REACH_LIMIT references, however many entries it has.
+        let mut doc = Document::with_version("1.7");
+        let target = doc.add_object(Object::Integer(0));
+        let wide = doc.add_object(Object::Array(vec![Object::Reference(target); 100_000]));
+        let image = doc.add_object(lopdf::dictionary! { "Foo" => wide });
+        assert!(matches!(
+            reachable(&doc, image, REACH_LIMIT),
+            Reads::Everything
+        ));
+        let small = doc.add_object(lopdf::dictionary! { "Foo" => target });
+        match reachable(&doc, small, REACH_LIMIT) {
+            Reads::Objects(ids) => assert_eq!(ids, HashSet::from([small, target])),
+            Reads::Everything => panic!(),
+        }
     }
 
     #[test]
