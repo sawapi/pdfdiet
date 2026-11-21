@@ -57,7 +57,7 @@ mod type1;
 
 pub use images::ImageInfo;
 
-use images::collect_images;
+use images::{collect_images, indexed_lookups};
 use limits::load_options;
 
 use decode::{decode_image, indexed_palette};
@@ -378,9 +378,26 @@ pub(crate) fn compress_document(
         );
     }
 
+    // An image that is also some /Indexed color space's lookup table holds
+    // that color space's colors: recompressing it would change them.
+    let lookups = indexed_lookups(doc);
+    let images: Vec<ImageInfo> = images
+        .into_iter()
+        .filter(|info| {
+            let keep = !lookups.contains(&info.id);
+            if !keep {
+                stats.log.push(format!(
+                    "skip obj {} {}: also an Indexed lookup table",
+                    info.id.0, info.id.1
+                ));
+            }
+            keep
+        })
+        .collect();
+
     // Premultiplied-alpha pairs must be resampled together; see
     // recompress_matte_pairs. Whatever it handled is done.
-    let matte_done = recompress_matte_pairs(doc, &images, opts, &mut stats);
+    let matte_done = recompress_matte_pairs(doc, &images, &lookups, opts, &mut stats);
     // Images serving as some image's soft mask: these must stay DeviceGray.
     let soft_masks: std::collections::HashSet<ObjectId> = doc
         .objects
@@ -1117,13 +1134,14 @@ mod signature_tests {
     }
 
     #[test]
-    fn an_image_used_as_another_images_palette_is_read_unchanged() {
-        // Image 1 is also the /Indexed lookup table of image 2. One image
-        // after another, image 2 reads image 1 after it was rewritten; the
-        // threaded pass must do the same.
+    fn an_image_used_as_another_images_palette_is_kept() {
+        // Image 1 is also the /Indexed lookup table of image 2: its bytes
+        // are image 2's colors, so it is left as it is (recompressing it
+        // would repaint image 2), and image 2 reads it unchanged.
         let n = 64usize;
         let mut doc = Document::with_version("1.7");
         let rgb: Vec<u8> = (0..n * n * 3).map(|i| (i % 251) as u8).collect();
+        let rgb_copy = rgb.clone();
         let a = doc.add_object(lopdf::Stream::new(
             dictionary! {
                 "Type" => "XObject", "Subtype" => "Image", "Width" => n as i64,
@@ -1160,12 +1178,45 @@ mod signature_tests {
         doc.trailer.set("Root", catalog);
         let mut bytes = Vec::new();
         doc.save_to(&mut bytes).unwrap();
-        let (_, stats) = compress_bytes(&bytes, &CompressOptions::default()).unwrap();
-        assert!(stats.log[0].starts_with("obj 1 0: "), "{:?}", stats.log);
-        assert!(
-            stats.log[1].starts_with("skip obj 2 0") && stats.log[1].contains("lookup table"),
+        let (out, stats) = compress_bytes(&bytes, &CompressOptions::default()).unwrap();
+        assert_eq!(
+            stats.log[0], "skip obj 1 0: also an Indexed lookup table",
             "{:?}",
             stats.log
+        );
+        assert!(
+            !stats.log.iter().any(|l| l.starts_with("obj 1 0")),
+            "{:?}",
+            stats.log
+        );
+        let out = Document::load_mem(&out).unwrap();
+        let table = out
+            .get_object(a)
+            .unwrap()
+            .as_stream()
+            .unwrap()
+            .get_plain_content()
+            .unwrap();
+        assert_eq!(table, rgb_copy);
+    }
+
+    #[test]
+    fn lookup_tables_are_found_through_references() {
+        // A color space array kept as its own object, in a resource
+        // dictionary, whose lookup is reached through a chain of references.
+        let mut doc = Document::with_version("1.7");
+        let table = doc.add_object(lopdf::Stream::new(dictionary! {}, vec![0; 6]));
+        let hop = doc.add_object(Object::Reference(table));
+        let cs = doc.add_object(Object::Array(vec![
+            "I".into(),
+            "DeviceRGB".into(),
+            1.into(),
+            hop.into(),
+        ]));
+        doc.add_object(dictionary! { "ColorSpace" => dictionary! { "CS0" => cs } });
+        assert_eq!(
+            indexed_lookups(&doc),
+            std::collections::HashSet::from([table])
         );
     }
 

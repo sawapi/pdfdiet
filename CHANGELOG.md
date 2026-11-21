@@ -11,6 +11,11 @@
   other images (a soft mask, a palette stored in an image) wait for them
   as before. The WebAssembly build is unchanged (one thread).
 - smallpeg 0.16. Output is unchanged.
+- An image that also serves as the lookup table of an `/Indexed` color
+  space (its bytes are another image's palette) is now left as it is.
+  Recompressing it changed that palette, so the other image was drawn in
+  the wrong colors. The log reports it as
+  `skip obj N G: also an Indexed lookup table`.
 - A document whose object stream cannot be read (it does not parse, or
   inflates past the limit) is no longer compressed. The loader drops such
   a stream with every object in it, so the output would have lost them,
