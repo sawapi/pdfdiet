@@ -819,8 +819,10 @@ pub(crate) fn work_pixels(doc: &Document, info: &ImageInfo) -> u64 {
         return 1;
     };
     let mask = match s.dict.get(b"SMask") {
-        Ok(Object::Reference(m)) => match doc.objects.get(m) {
-            Some(Object::Stream(m)) => stream_pixels(m),
+        // Resolved the way bleeding and the /Matte pass resolve it, through
+        // chains of references.
+        Ok(Object::Reference(m)) => match doc.get_object(*m) {
+            Ok(Object::Stream(m)) => stream_pixels(m),
             _ => 0,
         },
         _ => 0,
@@ -1184,6 +1186,15 @@ mod signature_tests {
             .into_iter()
             .find(|i| i.id == image)
             .unwrap();
+        assert_eq!(work_pixels(&doc, &info), 100_000_001);
+        // Also when the mask is reached through another reference.
+        let hop = doc.add_object(Object::Reference(mask));
+        doc.get_object_mut(image)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set("SMask", hop);
         assert_eq!(work_pixels(&doc, &info), 100_000_001);
     }
 }

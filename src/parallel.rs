@@ -8,8 +8,9 @@ use lopdf::{Document, Object, ObjectId};
 
 use crate::decode::MAX_PIXELS;
 
-/// Most references followed when listing what an image may read.
-pub(crate) const REACH_LIMIT: usize = 1024;
+/// Most values (references, array entries, dictionary entries) examined
+/// when listing what an image may read.
+pub(crate) const REACH_LIMIT: usize = 4096;
 
 /// Most worker threads used, whatever the machine has.
 const MAX_WORKERS: usize = 8;
@@ -45,37 +46,46 @@ pub(crate) fn map_bounded<T: Send>(
     let freed = Condvar::new();
     let mut results: Vec<Option<T>> = (0..items.len()).map(|_| None).collect();
     std::thread::scope(|scope| {
+        // A worker the system refuses to start is simply missing: the
+        // others take its items. With none started, run here instead.
         let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut mine = Vec::new();
-                    loop {
-                        let k = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(&item) = items.get(k) else {
-                            break;
-                        };
-                        let w = weight(item).clamp(1, MAX_PIXELS);
-                        {
-                            let mut used = in_flight.lock().unwrap();
-                            while *used > 0 && *used + w > MAX_PIXELS {
-                                used = freed.wait(used).unwrap();
+            .filter_map(|_| {
+                std::thread::Builder::new()
+                    .spawn_scoped(scope, || {
+                        let mut mine = Vec::new();
+                        loop {
+                            let k = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&item) = items.get(k) else {
+                                break;
+                            };
+                            let w = weight(item).clamp(1, MAX_PIXELS);
+                            {
+                                let mut used = in_flight.lock().unwrap();
+                                while *used > 0 && *used + w > MAX_PIXELS {
+                                    used = freed.wait(used).unwrap();
+                                }
+                                *used += w;
                             }
-                            *used += w;
+                            // Released even if `f` panics, so that no worker
+                            // waits forever for room that never frees up.
+                            let _release = Release {
+                                in_flight: &in_flight,
+                                freed: &freed,
+                                weight: w,
+                            };
+                            let result = f(item);
+                            mine.push((k, result));
                         }
-                        // Released even if `f` panics, so that no worker
-                        // waits forever for room that never frees up.
-                        let _release = Release {
-                            in_flight: &in_flight,
-                            freed: &freed,
-                            weight: w,
-                        };
-                        let result = f(item);
-                        mine.push((k, result));
-                    }
-                    mine
-                })
+                        mine
+                    })
+                    .ok()
             })
             .collect();
+        if handles.is_empty() {
+            for (k, &item) in items.iter().enumerate() {
+                results[k] = Some(f(item));
+            }
+        }
         for handle in handles {
             let mine = handle
                 .join()
@@ -145,9 +155,10 @@ pub(crate) fn batches(
 }
 
 /// Every object reachable through references from object `id` (itself
-/// included), not looking inside stream contents. Following more than
-/// `limit` references in all (repeats included, so the work stays bounded
-/// however wide a shared object is) gives Everything.
+/// included), not looking inside stream contents. Examining more than
+/// `limit` values in all (references, array and dictionary entries,
+/// repeats included, so the work stays bounded however wide a shared
+/// object is) gives Everything.
 pub(crate) fn reachable(doc: &Document, id: ObjectId, limit: usize) -> Reads {
     let mut seen: HashSet<ObjectId> = HashSet::from([id]);
     let mut stack = vec![id];
@@ -169,14 +180,14 @@ pub(crate) fn reachable(doc: &Document, id: ObjectId, limit: usize) -> Reads {
 }
 
 /// Push the references in `o` to `out`, charging one unit of `budget` per
-/// reference; false once the budget runs out.
+/// value examined; false once the budget runs out.
 fn collect_refs(o: &Object, out: &mut Vec<ObjectId>, budget: &mut usize) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
     match o {
         Object::Reference(r) => {
-            if *budget == 0 {
-                return false;
-            }
-            *budget -= 1;
             out.push(*r);
             true
         }
@@ -244,13 +255,20 @@ mod tests {
     }
 
     #[test]
-    fn reachable_work_is_bounded_by_references_followed() {
+    fn reachable_work_is_bounded_by_values_examined() {
         // Every image refers to one wide array: the walk stops after
-        // REACH_LIMIT references, however many entries it has.
+        // REACH_LIMIT values, however many entries it has, with or
+        // without references among them.
         let mut doc = Document::with_version("1.7");
         let target = doc.add_object(Object::Integer(0));
         let wide = doc.add_object(Object::Array(vec![Object::Reference(target); 100_000]));
         let image = doc.add_object(lopdf::dictionary! { "Foo" => wide });
+        assert!(matches!(
+            reachable(&doc, image, REACH_LIMIT),
+            Reads::Everything
+        ));
+        let plain = doc.add_object(Object::Array(vec![Object::Integer(1); 1_000_000]));
+        let image = doc.add_object(lopdf::dictionary! { "Foo" => plain });
         assert!(matches!(
             reachable(&doc, image, REACH_LIMIT),
             Reads::Everything
