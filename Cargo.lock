@@ -713,8 +713,6 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 [[package]]
 name = "smallpeg"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d695699e3a43476038ece27fe20693981758ca0b51be6145233849461723c31e"
 
 [[package]]
 name = "stringprep"
