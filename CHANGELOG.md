@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+### Rust
 
 - Images are processed on several threads (up to 8) in the native
   library and CLI, with the same output as before: about twice as fast
@@ -10,17 +12,23 @@
   stays close to what one large image already needs. Images that read
   other images (a soft mask, a palette stored in an image) wait for them
   as before. The WebAssembly build is unchanged (one thread).
-- smallpeg 0.16. Output is unchanged.
-- An image that also serves as the lookup table of an `/Indexed` color
-  space (its bytes are another image's palette) is now left as it is.
-  Recompressing it changed that palette, so the other image was drawn in
-  the wrong colors. The log reports it as
-  `skip obj N G: also an Indexed lookup table`.
+
+### All builds
+
 - A document whose object stream cannot be read (it does not parse, or
   inflates past the limit) is no longer compressed. The loader drops such
   a stream with every object in it, so the output would have lost them,
   and a signature stored there would have gone unnoticed. It now fails as
   an invalid PDF (`invalid-pdf` in npm).
+- An image that also serves as the lookup table of an `/Indexed` color
+  space (its bytes are another image's palette) is now left as it is.
+  Recompressing it changed that palette, so the other image was drawn in
+  the wrong colors. The log reports it as
+  `skip obj N G: also an Indexed lookup table`.
+- smallpeg 0.16. Output is unchanged.
+
+### Command-line tools
+
 - Both command-line tools write the output to a temporary file next to it
   and rename it into place, so a failed write never leaves a truncated
   file, even when `-o` names the input. A symlinked output is followed,
