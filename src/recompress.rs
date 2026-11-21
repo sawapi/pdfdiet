@@ -12,6 +12,7 @@ use crate::decode::{colorspace_components, decode_samples, indexed_palette};
 use crate::images::{ImageInfo, target_size};
 use crate::jpeg::{ChromaClass, classify_chroma, encode_jpeg};
 use crate::limits::{MAX_INFLATE, inflate};
+use crate::parallel::Reads;
 use crate::{CompressOptions, CompressStats, filter_names, resolve};
 
 /// Downsample and recompress premultiplied-alpha (/Matte) pairs as pairs.
@@ -47,21 +48,51 @@ pub(crate) fn recompress_matte_pairs(
             *mask_refs.entry(*sid).or_default() += 1;
         }
     }
-    // A pair's halves belong to no other pair (the parent has no /Matte,
-    // the mask has one and a single parent), so pairs are independent and
-    // can be processed on several threads, then written back in order.
-    let outcomes = crate::parallel::map_bounded(
-        &(0..images.len()).collect::<Vec<_>>(),
-        |i| 2 * crate::decoded_pixels(&images[i]),
-        |i| matte_pair(doc, &images[i], opts, &mask_refs),
+    // Whether an image is a pair's parent depends only on keys no pair
+    // rewrites (/Matte, /SMask, /Mask) and on mask_refs, so it is decided
+    // up front. Pairs run on several threads, in batches that give the
+    // same result as one after another (see parallel::batches): a pair
+    // writes its two halves and may read anything they refer to.
+    let pair_mask: Vec<Option<ObjectId>> = images
+        .iter()
+        .map(|info| matte_pair_mask(doc, info.id, &mask_refs))
+        .collect();
+    let units: Vec<usize> = (0..images.len())
+        .filter(|&i| pair_mask[i].is_some())
+        .collect();
+    let limit = crate::parallel::REACH_LIMIT;
+    let batches = crate::parallel::batches(
+        &units,
+        |i| {
+            let mask = pair_mask[i].expect("a pair");
+            match (
+                crate::parallel::reachable(doc, images[i].id, limit),
+                crate::parallel::reachable(doc, mask, limit),
+            ) {
+                (Reads::Objects(mut a), Reads::Objects(b)) => {
+                    a.extend(b);
+                    Reads::Objects(a)
+                }
+                _ => Reads::Everything,
+            }
+        },
+        |i| vec![images[i].id, pair_mask[i].expect("a pair")],
     );
     let mut done = HashMap::new();
-    for outcome in outcomes {
-        outcome.staged.apply(doc);
-        stats.log.extend(outcome.log);
-        stats.stream_bytes_saved += outcome.saved;
-        stats.images_recompressed += outcome.recompressed;
-        done.extend(outcome.done);
+    for batch in batches {
+        let snapshot: &Document = doc;
+        let outcomes = crate::parallel::map_bounded(
+            &batch,
+            |i| 2 * crate::work_pixels(snapshot, &images[i]),
+            |i| matte_pair(snapshot, &images[i], opts, &mask_refs),
+        );
+        for outcome in outcomes {
+            outcome.staged.apply(doc);
+            stats.log.extend(outcome.log);
+            stats.stream_bytes_saved += outcome.saved;
+            stats.images_recompressed += outcome.recompressed;
+            done.extend(outcome.done);
+        }
     }
     done
 }

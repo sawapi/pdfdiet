@@ -767,9 +767,10 @@ fn process_image(
 
 /// Run process_image over every image not already written by the /Matte
 /// pass, on several threads, with the same result as one image after
-/// another in `images` order: a parent image reads its soft mask (to bleed
-/// colors under it), so a parent whose mask comes earlier in the list waits
-/// until the mask's new stream is written. Returns the outcomes in order.
+/// another in `images` order. An image can read other images (its soft
+/// mask, to bleed colors under it; an /Indexed lookup table stored in an
+/// image stream), so images run in batches: see parallel::batches.
+/// Returns the outcomes in order.
 fn process_images(
     doc: &mut Document,
     images: &[ImageInfo],
@@ -777,36 +778,20 @@ fn process_images(
     matte_done: &std::collections::HashMap<ObjectId, MatteHalf>,
     soft_masks: &std::collections::HashSet<ObjectId>,
 ) -> Vec<Option<ImageOutcome>> {
-    let position: std::collections::HashMap<ObjectId, usize> = images
-        .iter()
-        .enumerate()
-        .map(|(i, info)| (info.id, i))
-        .collect();
-    let mask_before: Vec<Option<usize>> = images
-        .iter()
-        .enumerate()
-        .map(|(i, info)| match doc.objects.get(&info.id) {
-            Some(Object::Stream(s)) => match s.dict.get(b"SMask") {
-                Ok(Object::Reference(mask)) => position.get(mask).copied().filter(|&j| j < i),
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
-    let written = |i: usize| matches!(matte_done.get(&images[i].id), Some(MatteHalf::Written));
-    let mut done: Vec<bool> = (0..images.len()).map(written).collect();
-    let mut pending: Vec<usize> = (0..images.len()).filter(|&i| !done[i]).collect();
     let mut outcomes: Vec<Option<ImageOutcome>> = (0..images.len()).map(|_| None).collect();
-    while !pending.is_empty() {
-        // The first pending image is always ready: its mask, if earlier,
-        // is done.
-        let (ready, rest): (Vec<usize>, Vec<usize>) = pending
-            .iter()
-            .partition(|&&i| mask_before[i].is_none_or(|j| done[j]));
+    let units: Vec<usize> = (0..images.len())
+        .filter(|&i| !matches!(matte_done.get(&images[i].id), Some(MatteHalf::Written)))
+        .collect();
+    let batches = parallel::batches(
+        &units,
+        |i| parallel::reachable(doc, images[i].id, parallel::REACH_LIMIT),
+        |i| vec![images[i].id],
+    );
+    for batch in batches {
         let snapshot: &Document = doc;
         let results = parallel::map_bounded(
-            &ready,
-            |i| decoded_pixels(&images[i]),
+            &batch,
+            |i| work_pixels(snapshot, &images[i]),
             |i| {
                 let info = &images[i];
                 process_image(
@@ -818,19 +803,31 @@ fn process_images(
                 )
             },
         );
-        for (i, mut outcome) in ready.into_iter().zip(results) {
+        for (i, mut outcome) in batch.into_iter().zip(results) {
             std::mem::take(&mut outcome.staged).apply(doc);
             outcomes[i] = Some(outcome);
-            done[i] = true;
         }
-        pending = rest;
     }
     outcomes
 }
 
-/// Roughly how many pixels processing the image holds at once.
-pub(crate) fn decoded_pixels(info: &ImageInfo) -> u64 {
-    (info.width.max(1) as u64).saturating_mul(info.height.max(1) as u64)
+/// Roughly how many pixels processing the image may hold at once: its
+/// declared size, or a JPEG's own frame size when larger (the lossless
+/// optimizer allocates from the frame header, which need not match the
+/// dictionary). A JPEG inside another filter is not inspected and counts
+/// as the most an image may have.
+pub(crate) fn work_pixels(doc: &Document, info: &ImageInfo) -> u64 {
+    let declared = (info.width.max(1) as u64).saturating_mul(info.height.max(1) as u64);
+    if !info.filters.iter().any(|f| f == "DCTDecode") {
+        return declared;
+    }
+    match (info.filters.len(), doc.objects.get(&info.id)) {
+        (1, Some(Object::Stream(s))) => match smallpeg::jpeg_info(&s.content) {
+            Some(j) => declared.max(j.width as u64 * j.height as u64),
+            None => declared,
+        },
+        _ => decode::MAX_PIXELS,
+    }
 }
 
 /// Refuse documents that compression would damage rather than shrink.
@@ -1097,5 +1094,58 @@ mod signature_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("could not be read"), "{err}");
+    }
+
+    #[test]
+    fn an_image_used_as_another_images_palette_is_read_unchanged() {
+        // Image 1 is also the /Indexed lookup table of image 2. One image
+        // after another, image 2 reads image 1 after it was rewritten; the
+        // threaded pass must do the same.
+        let n = 64usize;
+        let mut doc = Document::with_version("1.7");
+        let rgb: Vec<u8> = (0..n * n * 3).map(|i| (i % 251) as u8).collect();
+        let a = doc.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => n as i64,
+                "Height" => n as i64, "BitsPerComponent" => 8, "ColorSpace" => "DeviceRGB",
+            },
+            rgb,
+        ));
+        let indices: Vec<u8> = (0..n * n).map(|i| (i % 2) as u8).collect();
+        let b = doc.add_object(lopdf::Stream::new(
+            dictionary! {
+                "Type" => "XObject", "Subtype" => "Image", "Width" => n as i64,
+                "Height" => n as i64, "BitsPerComponent" => 8,
+                "ColorSpace" => vec!["Indexed".into(), "DeviceRGB".into(), 1.into(), a.into()],
+            },
+            indices,
+        ));
+        let content = doc.add_object(lopdf::Stream::new(
+            dictionary! {},
+            b"q 64 0 0 64 0 0 cm /A Do Q q 64 0 0 64 0 0 cm /B Do Q".to_vec(),
+        ));
+        let pages = doc.new_object_id();
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages, "Contents" => content,
+            "MediaBox" => vec![0.into(), 0.into(), 64.into(), 64.into()],
+            "Resources" => dictionary! { "XObject" => dictionary! { "A" => a, "B" => b } },
+        });
+        doc.objects.insert(
+            pages,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+        doc.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let (_, stats) = compress_bytes(&bytes, &CompressOptions::default()).unwrap();
+        assert!(stats.log[0].starts_with("obj 1 0: "), "{:?}", stats.log);
+        assert!(
+            stats.log[1].starts_with("skip obj 2 0") && stats.log[1].contains("lookup table"),
+            "{:?}",
+            stats.log
+        );
     }
 }
