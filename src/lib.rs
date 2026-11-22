@@ -40,6 +40,7 @@ use image::DynamicImage;
 use lopdf::{Dictionary, Document, Object, ObjectId};
 
 mod ccitt;
+mod cffsubrs;
 mod cffsubset;
 mod decode;
 mod dedup;
@@ -459,6 +460,13 @@ pub(crate) fn compress_document(
     let (fonts_converted, cff_saved) = type1::convert_type1_fonts(doc, &mut stats.log);
     stats.fonts_converted = fonts_converted;
     stats.stream_bytes_saved += cff_saved;
+
+    // Every CFF program: subroutines no charstring calls are emptied
+    // (after outline subsetting and Type 1 conversion, which change what
+    // is called and what is CFF).
+    // (Like the CFF subsetting above, the saving shows in the final file
+    // size: the programs are compressed by the document-wide pass.)
+    cffsubrs::prune_cff_subrs(doc, &mut stats.log);
 
     let (deduped, dedup_saved) = dedup_streams(doc);
     if deduped > 0 {

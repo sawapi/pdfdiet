@@ -167,13 +167,13 @@ fn reach_program(doc: &Document, font: &Dictionary) -> Option<(ObjectId, bool)> 
 // CFF reading and writing.
 
 /// An INDEX: its absolute byte range and the absolute ranges of its items.
-struct Index {
-    start: usize,
-    end: usize,
-    items: Vec<(usize, usize)>,
+pub(crate) struct Index {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) items: Vec<(usize, usize)>,
 }
 
-fn read_index(d: &[u8], at: usize) -> Option<Index> {
+pub(crate) fn read_index(d: &[u8], at: usize) -> Option<Index> {
     let count = u16::from_be_bytes([*d.get(at)?, *d.get(at + 1)?]) as usize;
     if count == 0 {
         return Some(Index {
@@ -221,7 +221,7 @@ fn read_index(d: &[u8], at: usize) -> Option<Index> {
     })
 }
 
-fn write_index(items: &[&[u8]]) -> Vec<u8> {
+pub(crate) fn write_index(items: &[&[u8]]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&(items.len() as u16).to_be_bytes());
     if items.is_empty() {
@@ -251,12 +251,12 @@ fn write_index(items: &[&[u8]]) -> Vec<u8> {
 
 /// One DICT entry: raw operand encodings and the operator (escaped
 /// operators as 1200 + second byte).
-struct Entry {
-    operands: Vec<Vec<u8>>,
-    op: u16,
+pub(crate) struct Entry {
+    pub(crate) operands: Vec<Vec<u8>>,
+    pub(crate) op: u16,
 }
 
-fn parse_dict(d: &[u8]) -> Option<Vec<Entry>> {
+pub(crate) fn parse_dict(d: &[u8]) -> Option<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut operands: Vec<Vec<u8>> = Vec::new();
     let mut i = 0;
@@ -301,7 +301,7 @@ fn parse_dict(d: &[u8]) -> Option<Vec<Entry>> {
     operands.is_empty().then_some(entries)
 }
 
-fn int_value(raw: &[u8]) -> Option<i64> {
+pub(crate) fn int_value(raw: &[u8]) -> Option<i64> {
     let b0 = *raw.first()? as i64;
     Some(match raw[0] {
         28 => i16::from_be_bytes([*raw.get(1)?, *raw.get(2)?]) as i64,
@@ -313,13 +313,13 @@ fn int_value(raw: &[u8]) -> Option<i64> {
     })
 }
 
-fn int32(v: usize) -> Vec<u8> {
+pub(crate) fn int32(v: usize) -> Vec<u8> {
     let mut out = vec![29];
     out.extend_from_slice(&(v as i32).to_be_bytes());
     out
 }
 
-fn write_dict(entries: &[Entry]) -> Vec<u8> {
+pub(crate) fn write_dict(entries: &[Entry]) -> Vec<u8> {
     let mut out = Vec::new();
     for e in entries {
         for o in &e.operands {
@@ -334,7 +334,7 @@ fn write_dict(entries: &[Entry]) -> Vec<u8> {
     out
 }
 
-fn single_int(entries: &[Entry], op: u16) -> Option<usize> {
+pub(crate) fn single_int(entries: &[Entry], op: u16) -> Option<usize> {
     let e = entries.iter().find(|e| e.op == op)?;
     match e.operands.as_slice() {
         [v] => usize::try_from(int_value(v)?).ok(),
@@ -343,22 +343,22 @@ fn single_int(entries: &[Entry], op: u16) -> Option<usize> {
 }
 
 /// Replace an entry's operands (the entry must exist).
-fn set_operands(entries: &mut [Entry], op: u16, operands: Vec<Vec<u8>>) -> Option<()> {
+pub(crate) fn set_operands(entries: &mut [Entry], op: u16, operands: Vec<Vec<u8>>) -> Option<()> {
     entries.iter_mut().find(|e| e.op == op)?.operands = operands;
     Some(())
 }
 
-const CHARSET: u16 = 15;
-const CHARSTRINGS: u16 = 17;
-const PRIVATE: u16 = 18;
-const SUBRS: u16 = 19;
-const CHARSTRING_TYPE: u16 = 1206;
-const ROS: u16 = 1230;
-const FD_ARRAY: u16 = 1236;
-const FD_SELECT: u16 = 1237;
+pub(crate) const CHARSET: u16 = 15;
+pub(crate) const CHARSTRINGS: u16 = 17;
+pub(crate) const PRIVATE: u16 = 18;
+pub(crate) const SUBRS: u16 = 19;
+pub(crate) const CHARSTRING_TYPE: u16 = 1206;
+pub(crate) const ROS: u16 = 1230;
+pub(crate) const FD_ARRAY: u16 = 1236;
+pub(crate) const FD_SELECT: u16 = 1237;
 
 /// CID of every glyph (gid 0 is CID 0) and the charset's byte length.
-fn read_charset(d: &[u8], at: usize, glyphs: usize) -> Option<(Vec<u16>, usize)> {
+pub(crate) fn read_charset(d: &[u8], at: usize, glyphs: usize) -> Option<(Vec<u16>, usize)> {
     let mut cids = vec![0u16];
     let be = |p: usize| Some(u16::from_be_bytes([*d.get(p)?, *d.get(p + 1)?]));
     let format = *d.get(at)?;
@@ -387,7 +387,7 @@ fn read_charset(d: &[u8], at: usize, glyphs: usize) -> Option<(Vec<u16>, usize)>
     (cids.len() == glyphs).then_some((cids, p - at))
 }
 
-fn fdselect_len(d: &[u8], at: usize, glyphs: usize) -> Option<usize> {
+pub(crate) fn fdselect_len(d: &[u8], at: usize, glyphs: usize) -> Option<usize> {
     match *d.get(at)? {
         0 => (at + 1 + glyphs <= d.len()).then_some(1 + glyphs),
         3 => {

@@ -1,5 +1,5 @@
 //! Font-program fuzzing for the font passes (merge, strip, union, subset,
-//! CFF subset, Type1 conversion), run as an ignored test:
+//! CFF subset, Type1 conversion, CFF subroutine pruning), run as an ignored test:
 //!
 //!   FONTFUZZ_SEEDS="a.pdf b.pdf" FONTFUZZ_ITERS=2000 \
 //!     cargo test --release fontfuzz -- --ignored --nocapture
@@ -10,7 +10,7 @@
 //! parsers per minute. A watchdog aborts on a case that runs too long or
 //! whose RSS grows past a bound, printing the case to replay
 //! (FONTFUZZ_ONLY=<seed file index>:<case>). Panics are caught and counted.
-use crate::{cffsubset, fontunion, merge_font_subsets, subset, type1};
+use crate::{cffsubrs, cffsubset, fontunion, merge_font_subsets, subset, type1};
 use lopdf::{Document, Object, ObjectId};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -157,6 +157,7 @@ fn run_passes(doc: &mut Document) {
     subset::subset_truetype_fonts(doc, &mut log, true);
     cffsubset::subset_cff_cid_fonts(doc, &mut log);
     type1::convert_type1_fonts(doc, &mut log);
+    cffsubrs::prune_cff_subrs(doc, &mut log);
 }
 
 #[test]
