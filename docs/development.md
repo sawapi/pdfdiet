@@ -8,14 +8,16 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-The crate builds against `smallpeg` from a sibling checkout
-(`path = "../smallpeg"`), falling back to the crates.io release when
-packaged. Clone both side by side:
+`smallpeg` comes from crates.io, at the version recorded in
+`Cargo.lock`, for every build: tests, the npm package and the website.
+Raising it is a change of its own (`Cargo.toml`, `Cargo.lock`, a
+CHANGELOG line). To try unreleased smallpeg work, point at a local
+checkout without committing it:
 
-```
-work/
-  pdfdiet/
-  smallpeg/
+```toml
+# Cargo.toml (local only)
+[patch.crates-io]
+smallpeg = { path = "../smallpeg" }
 ```
 
 The library builds without the command line tool's dependencies with
