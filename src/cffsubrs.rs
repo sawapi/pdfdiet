@@ -21,7 +21,7 @@ use crate::cffsubset::{
     int_value, int32, parse_dict, read_charset, read_index, set_operands, single_int, write_dict,
     write_index,
 };
-use crate::{MAX_INFLATE, inflate};
+use crate::{MAX_INFLATE, MAX_PASS_BYTES, inflate};
 
 const ENCODING: u16 = 16;
 const SYNTHETIC_BASE: u16 = 1220;
@@ -34,6 +34,8 @@ const MIN_SAVING: usize = 64;
 /// Subroutine nesting, as Type 2 allows.
 const MAX_DEPTH: usize = 10;
 const MAX_STACK: usize = 48;
+/// Font DICTs a CID font may use (FDSelect stores one byte per glyph).
+const MAX_FDS: usize = 256;
 const RETURN: &[u8] = &[11];
 
 /// Empty the uncalled subroutines of every bare CFF program. Returns
@@ -59,6 +61,8 @@ pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usi
     ids.sort();
     ids.dedup();
     let mut budget = MAX_DOC_STEPS;
+    // Inflated bytes, across the pass.
+    let mut held = 0usize;
     let mut rewritten = 0;
     let mut dropped = 0i64;
     for id in ids {
@@ -78,6 +82,10 @@ pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usi
         let Ok(data) = inflate(stream, MAX_INFLATE) else {
             continue;
         };
+        held += data.len();
+        if held > MAX_PASS_BYTES {
+            break;
+        }
         let Some((out, emptied)) = prune(&data, &mut budget) else {
             continue;
         };
@@ -122,6 +130,16 @@ fn distinct(dict: &[Entry]) -> bool {
     ops.windows(2).all(|w| w[0] != w[1])
 }
 
+/// An entry's single non-negative integer: Some(None) when absent, None
+/// when present in any other form (readers disagree on those, and an offset
+/// not understood would survive the new layout stale).
+fn strict_int(dict: &[Entry], op: u16) -> Option<Option<usize>> {
+    match dict.iter().any(|e| e.op == op) {
+        true => single_int(dict, op).map(Some),
+        false => Some(None),
+    }
+}
+
 fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
     let [size, off] = entry.operands.as_slice() else {
         return None;
@@ -132,7 +150,7 @@ fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
     if !distinct(&dict) {
         return None;
     }
-    let subrs = match single_int(&dict, SUBRS) {
+    let subrs = match strict_int(&dict, SUBRS)? {
         Some(rel) => Some(read_index(d, off.checked_add(rel)?)?.items),
         None => None,
     };
@@ -200,6 +218,9 @@ struct Runner<'a> {
     global_used: Vec<bool>,
     steps: usize,
     limit: usize,
+    /// A CID font: an accented glyph (endchar with seac arguments) would
+    /// run its components with its own Font DICT's local subroutines.
+    cid: bool,
 }
 
 /// One glyph's state: the argument stack (None for a non-integer) and the
@@ -207,9 +228,9 @@ struct Runner<'a> {
 struct Glyph {
     stack: Vec<Option<i64>>,
     stems: usize,
-    /// A hintmask was seen: renderers differ on stems declared after it
-    /// (some ignore them, and then read the mask bytes differently), so
-    /// any such stem gives up.
+    /// A hintmask or the first moveto was seen: renderers differ on stems
+    /// declared after either (some fix the hints there and ignore later
+    /// stems, then read mask bytes differently), so any such stem gives up.
     masked: bool,
 }
 
@@ -301,7 +322,12 @@ impl Runner<'_> {
                     }
                 }
                 11 => return Some(Flow::Return),
-                14 => return Some(Flow::End),
+                14 => {
+                    if self.cid && glyph.stack.len() >= 4 {
+                        return None;
+                    }
+                    return Some(Flow::End);
+                }
                 12 => {
                     let e = *d.get(i)?;
                     i += 1;
@@ -313,7 +339,12 @@ impl Runner<'_> {
                     }
                     glyph.stack.clear();
                 }
-                4..=8 | 21 | 22 | 24..=27 | 30 | 31 => glyph.stack.clear(),
+                // rmoveto, hmoveto, vmoveto: hints are fixed from here.
+                4 | 21 | 22 => {
+                    glyph.masked = true;
+                    glyph.stack.clear();
+                }
+                5..=8 | 24..=27 | 30 | 31 => glyph.stack.clear(),
                 _ => return None,
             }
         }
@@ -337,7 +368,7 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
     };
     let mut top_dict = parse_dict(d.get(*ts..*te)?)?;
     if !distinct(&top_dict)
-        || single_int(&top_dict, CHARSTRING_TYPE).is_some_and(|t| t != 2)
+        || !matches!(strict_int(&top_dict, CHARSTRING_TYPE)?, None | Some(2))
         || top_dict.iter().any(|e| e.op == SYNTHETIC_BASE)
     {
         return None;
@@ -358,12 +389,26 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
     let mut fdselect = None;
     if cid {
         let fdarray = read_index(d, single_int(&top_dict, FD_ARRAY)?)?;
+        if fdarray.items.len() > MAX_FDS {
+            return None;
+        }
+        // Font DICTs may share one Subrs INDEX; each gets its own copy, so
+        // bound the copies by the program and the items by the step limit.
+        let (mut subr_items, mut subr_bytes) = (0usize, 0usize);
         for &(s, e) in &fdarray.items {
             let dict = parse_dict(d.get(s..e)?)?;
             if !distinct(&dict) {
                 return None;
             }
-            privates.push(read_private(d, dict.iter().find(|x| x.op == PRIVATE)?)?);
+            let private = read_private(d, dict.iter().find(|x| x.op == PRIVATE)?)?;
+            if let Some(items) = &private.subrs {
+                subr_items += items.len();
+                subr_bytes += items.last().map_or(0, |l| l.1) - items.first().map_or(0, |f| f.0);
+                if subr_items > MAX_STEPS.min(*budget) || subr_bytes > d.len() {
+                    return None;
+                }
+            }
+            privates.push(private);
             fd_dicts.push(dict);
         }
         let at = single_int(&top_dict, FD_SELECT)?;
@@ -384,6 +429,7 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
         global_used: vec![false; gsubrs.items.len()],
         steps: 0,
         limit: MAX_STEPS.min(*budget),
+        cid,
     };
     let mut local_used: Vec<Vec<bool>> = privates
         .iter()
@@ -435,11 +481,11 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
     // 5-byte integers), strings, global subroutines, then charset,
     // encoding, FDSelect, CharStrings, FDArray, and each Private DICT
     // followed by its local subroutines.
-    let charset = match single_int(&top_dict, CHARSET).filter(|&v| v > 2) {
+    let charset = match strict_int(&top_dict, CHARSET)?.filter(|&v| v > 2) {
         Some(at) => Some((at, read_charset(d, at, glyphs)?.1)),
         None => None,
     };
-    let encoding = match single_int(&top_dict, ENCODING).filter(|&v| v > 1 && !cid) {
+    let encoding = match strict_int(&top_dict, ENCODING)?.filter(|&v| v > 1 && !cid) {
         Some(at) => Some((at, encoding_len(d, at)?)),
         None => None,
     };
@@ -651,6 +697,28 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn stems_after_the_first_moveto_are_left_alone() {
+        // Some renderers fix the hints at the first moveto: a stem after
+        // it changes how they read the next mask, as after a hintmask.
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let glyph: &[u8] = &[n(0), n(10), 1, n(5), 22, n(0), n(10), 1, n(-106), 10, 14];
+        assert!(prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_none());
+    }
+
+    #[test]
+    fn unusual_dict_operands_are_refused() {
+        // CharstringType 2 as a real (30 = real, 0x2F = "2" then end),
+        // or with two operands: readers take different values.
+        let real = parse_dict(&[30, 0x2F, 12, 6]).unwrap();
+        assert_eq!(strict_int(&real, CHARSTRING_TYPE), None);
+        let two = parse_dict(&[n(1), n(2), 12, 6]).unwrap();
+        assert_eq!(strict_int(&two, CHARSTRING_TYPE), None);
+        let one = parse_dict(&[n(2), 12, 6]).unwrap();
+        assert_eq!(strict_int(&one, CHARSTRING_TYPE), Some(Some(2)));
+        assert_eq!(strict_int(&one, CHARSET), Some(None));
     }
 
     #[test]
