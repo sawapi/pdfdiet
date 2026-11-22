@@ -25,8 +25,12 @@ use crate::{MAX_INFLATE, inflate};
 
 const ENCODING: u16 = 16;
 const SYNTHETIC_BASE: u16 = 1220;
-/// Charstring operators run per program, at most.
+/// Charstring operators run per program, and per document, at most.
 const MAX_STEPS: usize = 4_000_000;
+const MAX_DOC_STEPS: usize = 50_000_000;
+/// Smallest saving (uncompressed bytes) worth a rewrite: the new layout's
+/// fixed-size offsets can cost a few bytes once compressed.
+const MIN_SAVING: usize = 64;
 /// Subroutine nesting, as Type 2 allows.
 const MAX_DEPTH: usize = 10;
 const MAX_STACK: usize = 48;
@@ -35,20 +39,26 @@ const RETURN: &[u8] = &[11];
 /// Empty the uncalled subroutines of every bare CFF program. Returns
 /// (programs rewritten, uncompressed bytes dropped).
 pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usize, i64) {
+    // Programs some font descriptor embeds (orphans are dropped later).
     let mut ids: Vec<ObjectId> = doc
         .objects
-        .iter()
-        .filter_map(|(&id, o)| match o {
-            Object::Stream(s)
-                if matches!(s.dict.get(b"Subtype"), Ok(Object::Name(n))
-                    if n == b"Type1C" || n == b"CIDFontType0C") =>
-            {
-                Some(id)
-            }
+        .values()
+        .filter_map(|o| match o {
+            Object::Dictionary(d) => match d.get(b"FontFile3") {
+                Ok(Object::Reference(id)) => Some(*id),
+                _ => None,
+            },
             _ => None,
+        })
+        .filter(|id| {
+            matches!(doc.objects.get(id), Some(Object::Stream(s))
+                if matches!(s.dict.get(b"Subtype"), Ok(Object::Name(n))
+                    if n == b"Type1C" || n == b"CIDFontType0C"))
         })
         .collect();
     ids.sort();
+    ids.dedup();
+    let mut budget = MAX_DOC_STEPS;
     let mut rewritten = 0;
     let mut dropped = 0i64;
     for id in ids {
@@ -68,10 +78,10 @@ pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usi
         let Ok(data) = inflate(stream, MAX_INFLATE) else {
             continue;
         };
-        let Some((out, emptied)) = prune(&data) else {
+        let Some((out, emptied)) = prune(&data, &mut budget) else {
             continue;
         };
-        if out.len() >= data.len() {
+        if out.len() + MIN_SAVING > data.len() {
             continue;
         }
         let Some(Object::Stream(target)) = doc.objects.get_mut(&id) else {
@@ -103,6 +113,15 @@ struct Private {
     subrs: Option<Vec<(usize, usize)>>,
 }
 
+/// No operator appears twice. Readers disagree on which copy wins (the
+/// helpers here read the first, renderers the last), and a stale offset
+/// would survive the new layout.
+fn distinct(dict: &[Entry]) -> bool {
+    let mut ops: Vec<u16> = dict.iter().map(|e| e.op).collect();
+    ops.sort_unstable();
+    ops.windows(2).all(|w| w[0] != w[1])
+}
+
 fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
     let [size, off] = entry.operands.as_slice() else {
         return None;
@@ -110,6 +129,9 @@ fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
     let size = usize::try_from(int_value(size)?).ok()?;
     let off = usize::try_from(int_value(off)?).ok()?;
     let dict = parse_dict(d.get(off..off.checked_add(size)?)?)?;
+    if !distinct(&dict) {
+        return None;
+    }
     let subrs = match single_int(&dict, SUBRS) {
         Some(rel) => Some(read_index(d, off.checked_add(rel)?)?.items),
         None => None,
@@ -177,6 +199,7 @@ struct Runner<'a> {
     global: &'a [(usize, usize)],
     global_used: Vec<bool>,
     steps: usize,
+    limit: usize,
 }
 
 /// One glyph's state: the argument stack (None for a non-integer) and the
@@ -184,6 +207,10 @@ struct Runner<'a> {
 struct Glyph {
     stack: Vec<Option<i64>>,
     stems: usize,
+    /// A hintmask was seen: renderers differ on stems declared after it
+    /// (some ignore them, and then read the mask bytes differently), so
+    /// any such stem gives up.
+    masked: bool,
 }
 
 impl Runner<'_> {
@@ -200,7 +227,7 @@ impl Runner<'_> {
         let (mut i, end) = code;
         while i < end {
             self.steps += 1;
-            if self.steps > MAX_STEPS || glyph.stack.len() > MAX_STACK {
+            if self.steps > self.limit || glyph.stack.len() > MAX_STACK {
                 return None;
             }
             let b = d[i];
@@ -236,12 +263,19 @@ impl Runner<'_> {
                 }
                 // Stem hints: pairs of arguments (an odd one is the width).
                 1 | 3 | 18 | 23 => {
+                    if glyph.masked {
+                        return None;
+                    }
                     glyph.stems += glyph.stack.len() / 2;
                     glyph.stack.clear();
                 }
                 // hintmask / cntrmask: arguments left are implicit vstems;
                 // one mask bit per stem follows.
                 19 | 20 => {
+                    if glyph.masked && glyph.stack.len() >= 2 {
+                        return None;
+                    }
+                    glyph.masked |= b == 19;
                     glyph.stems += glyph.stack.len() / 2;
                     glyph.stack.clear();
                     i += glyph.stems.div_ceil(8);
@@ -290,7 +324,7 @@ impl Runner<'_> {
 
 /// The program with its uncalled subroutines emptied, and how many were,
 /// or None if it is outside what this reads or nothing would change.
-fn prune(d: &[u8]) -> Option<(Vec<u8>, usize)> {
+fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
     if d.len() < 4 || d[0] != 1 {
         return None;
     }
@@ -302,7 +336,8 @@ fn prune(d: &[u8]) -> Option<(Vec<u8>, usize)> {
         return None;
     };
     let mut top_dict = parse_dict(d.get(*ts..*te)?)?;
-    if single_int(&top_dict, CHARSTRING_TYPE).is_some_and(|t| t != 2)
+    if !distinct(&top_dict)
+        || single_int(&top_dict, CHARSTRING_TYPE).is_some_and(|t| t != 2)
         || top_dict.iter().any(|e| e.op == SYNTHETIC_BASE)
     {
         return None;
@@ -325,6 +360,9 @@ fn prune(d: &[u8]) -> Option<(Vec<u8>, usize)> {
         let fdarray = read_index(d, single_int(&top_dict, FD_ARRAY)?)?;
         for &(s, e) in &fdarray.items {
             let dict = parse_dict(d.get(s..e)?)?;
+            if !distinct(&dict) {
+                return None;
+            }
             privates.push(read_private(d, dict.iter().find(|x| x.op == PRIVATE)?)?);
             fd_dicts.push(dict);
         }
@@ -345,20 +383,27 @@ fn prune(d: &[u8]) -> Option<(Vec<u8>, usize)> {
         global: &gsubrs.items,
         global_used: vec![false; gsubrs.items.len()],
         steps: 0,
+        limit: MAX_STEPS.min(*budget),
     };
     let mut local_used: Vec<Vec<bool>> = privates
         .iter()
         .map(|p| vec![false; p.subrs.as_ref().map_or(0, |s| s.len())])
         .collect();
-    for (gid, &code) in cs.items.iter().enumerate() {
+    let ran = cs.items.iter().enumerate().try_for_each(|(gid, &code)| {
         let fd = glyph_fd[gid];
         let mut glyph = Glyph {
             stack: Vec::new(),
             stems: 0,
+            masked: false,
         };
         let local = privates[fd].subrs.as_deref();
-        runner.run(code, local, &mut local_used[fd], &mut glyph, 0)?;
-    }
+        runner
+            .run(code, local, &mut local_used[fd], &mut glyph, 0)
+            .map(|_| ())
+    });
+    // Work done counts against the document, whatever the outcome.
+    *budget = budget.saturating_sub(runner.steps);
+    ran?;
 
     let mut emptied = 0;
     let mut keep = |items: &[(usize, usize)], used: &[bool]| -> Vec<u8> {
@@ -557,14 +602,14 @@ mod tests {
         ];
         let global: [&[u8]; 2] = [&[n(5), n(6), 5, 11], &[n(7), n(8), 5, 11]];
         let d = mini_cff(&[glyph], &local, &global);
-        let (out, emptied) = prune(&d).unwrap();
+        let (out, emptied) = prune(&d, &mut MAX_DOC_STEPS.clone()).unwrap();
         assert_eq!(emptied, 3);
         let (cs, l, g) = charstrings_and_subrs(&out);
         assert_eq!(cs, vec![glyph.to_vec()]);
         assert_eq!(l, vec![vec![11], local[1].to_vec(), vec![11]]);
         assert_eq!(g, vec![global[0].to_vec(), vec![11]]);
         // Nothing left to empty.
-        assert!(prune(&out).is_none());
+        assert!(prune(&out, &mut MAX_DOC_STEPS.clone()).is_none());
     }
 
     #[test]
@@ -574,10 +619,59 @@ mod tests {
         let glyph: &[u8] = &[n(0), n(10), n(20), n(10), 1, n(-107), 10, 14];
         let local: [&[u8]; 2] = [&[19, 10, n(1), n(2), 5, 11], &[n(1), n(2), 5, 11]];
         let d = mini_cff(&[glyph], &local, &[]);
-        let (out, emptied) = prune(&d).unwrap();
+        let (out, emptied) = prune(&d, &mut MAX_DOC_STEPS.clone()).unwrap();
         assert_eq!(emptied, 1);
         let (_, l, _) = charstrings_and_subrs(&out);
         assert_eq!(l, vec![local[0].to_vec(), vec![11]]);
+    }
+
+    #[test]
+    fn stems_after_a_hint_mask_are_left_alone() {
+        // Renderers disagree on stems declared after a hintmask (one
+        // ignores them and reads fewer mask bytes, running 0x0A as a call).
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        // Implicit vstems at a second hintmask: 8 stems, then a ninth
+        // would make the mask 2 bytes (0x20 0x0A) instead of 1, hiding
+        // the call (0x0A) to subroutine 0 from the runner.
+        let mut second: Vec<u8> = (0..16).map(n).collect();
+        second.extend_from_slice(&[1, 19, 0xFF, n(0), n(10), n(-107), 19, 0x20, 10, 14]);
+        assert!(
+            prune(
+                &mini_cff(&[&second], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        // An explicit stem after one.
+        let explicit: &[u8] = &[n(0), n(10), 18, 19, 0x80, n(0), n(10), 3, n(-106), 10, 14];
+        assert!(
+            prune(
+                &mini_cff(&[explicit], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn repeated_dict_operators_are_refused() {
+        // CharStrings (17) twice: readers disagree on which copy wins.
+        let mut dict = int32(100);
+        dict.push(17);
+        assert!(distinct(&parse_dict(&dict).unwrap()));
+        dict.extend_from_slice(&int32(200));
+        dict.push(17);
+        assert!(!distinct(&parse_dict(&dict).unwrap()));
+    }
+
+    #[test]
+    fn the_document_budget_is_shared() {
+        let glyph: &[u8] = &[n(-107), 10, 14];
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let d = mini_cff(&[glyph], &local, &[]);
+        let mut budget = 5;
+        assert!(prune(&d, &mut budget).is_none());
+        assert_eq!(budget, 0);
     }
 
     #[test]
@@ -585,10 +679,22 @@ mod tests {
         // `add` (12 10) before a call: the subroutine number is computed.
         let glyph: &[u8] = &[n(-107), n(0), 12, 10, 10, 14];
         let local: [&[u8]; 2] = [&[11], &[n(1), n(2), 5, 11]];
-        assert!(prune(&mini_cff(&[glyph], &local, &[])).is_none());
+        assert!(prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_none());
         // A call out of range, and a charstring with no endchar.
-        assert!(prune(&mini_cff(&[&[n(50), 10, 14]], &local, &[])).is_none());
-        assert!(prune(&mini_cff(&[&[n(1), n(2), 5]], &local, &[])).is_none());
+        assert!(
+            prune(
+                &mini_cff(&[&[n(50), 10, 14]], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        assert!(
+            prune(
+                &mini_cff(&[&[n(1), n(2), 5]], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
     }
 
     /// Prune every `*.cff` in CFF_PRUNE_IN into CFF_PRUNE_OUT (an outside
@@ -614,7 +720,7 @@ mod tests {
         for path in names {
             let data = std::fs::read(&path).unwrap();
             let name = path.file_name().unwrap();
-            match prune(&data) {
+            match prune(&data, &mut usize::MAX.clone()) {
                 Some((out, emptied)) => {
                     println!(
                         "{}: {} -> {} ({} emptied)",
