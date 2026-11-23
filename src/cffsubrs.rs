@@ -76,7 +76,9 @@ pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usi
                 .collect::<Vec<_>>()
                 .as_slice(),
             [] | ["FlateDecode"]
-        ) {
+        ) || !matches!(stream.dict.get(b"DecodeParms"), Err(_) | Ok(Object::Null))
+        {
+            // A predictor (or parameters by reference) is not undone here.
             continue;
         }
         let Ok(data) = inflate(stream, MAX_INFLATE) else {
@@ -146,11 +148,16 @@ fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
     };
     let size = usize::try_from(int_value(size)?).ok()?;
     let off = usize::try_from(int_value(off)?).ok()?;
+    // Readers skip a Private DICT at offset 0 or of size 0.
+    if off == 0 || size == 0 {
+        return None;
+    }
     let dict = parse_dict(d.get(off..off.checked_add(size)?)?)?;
     if !distinct(&dict) {
         return None;
     }
-    let subrs = match strict_int(&dict, SUBRS)? {
+    // Readers take Subrs 0 as no local subroutines.
+    let subrs = match strict_int(&dict, SUBRS)?.filter(|&rel| rel != 0) {
         Some(rel) => Some(read_index(d, off.checked_add(rel)?)?.items),
         None => None,
     };
@@ -318,12 +325,15 @@ impl Runner<'_> {
                         return None;
                     }
                     if let Flow::End = self.run(sub, local, local_used, glyph, depth + 1)? {
-                        return Some(Flow::End);
+                        // Some readers go on past endchar.
+                        return (i == end).then_some(Flow::End);
                     }
                 }
                 11 => return Some(Flow::Return),
                 14 => {
-                    if self.cid && glyph.stack.len() >= 4 {
+                    // Seac in a CID font, or code after endchar (some
+                    // readers go on and run it).
+                    if (self.cid && glyph.stack.len() >= 4) || i != end {
                         return None;
                     }
                     return Some(Flow::End);
@@ -337,6 +347,9 @@ impl Runner<'_> {
                     if !matches!(e, 0 | 34..=37) {
                         return None;
                     }
+                    // Dotsection may be rewritten as a zero moveto, which
+                    // fixes the hints.
+                    glyph.masked |= e == 0;
                     glyph.stack.clear();
                 }
                 // rmoveto, hmoveto, vmoveto: hints are fixed from here.
@@ -380,6 +393,16 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
         return None;
     }
     let cid = top_dict.iter().any(|e| e.op == ROS);
+    // Entries the other kind of font would use: readers differ on whether
+    // they look at them, and their offsets would go stale.
+    let foreign: &[u16] = if cid {
+        &[PRIVATE, ENCODING]
+    } else {
+        &[FD_ARRAY, FD_SELECT]
+    };
+    if top_dict.iter().any(|e| foreign.contains(&e.op)) {
+        return None;
+    }
 
     // The Private DICTs (one per Font DICT for a CID font) and which one
     // each glyph uses.
@@ -402,9 +425,12 @@ fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
             }
             let private = read_private(d, dict.iter().find(|x| x.op == PRIVATE)?)?;
             if let Some(items) = &private.subrs {
+                // Reading the INDEX counts against the document, like
+                // running charstrings.
+                *budget = budget.saturating_sub(items.len());
                 subr_items += items.len();
                 subr_bytes += items.last().map_or(0, |l| l.1) - items.first().map_or(0, |f| f.0);
-                if subr_items > MAX_STEPS.min(*budget) || subr_bytes > d.len() {
+                if subr_items > MAX_STEPS || *budget == 0 || subr_bytes > d.len() {
                     return None;
                 }
             }
@@ -706,6 +732,41 @@ mod tests {
         let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
         let glyph: &[u8] = &[n(0), n(10), 1, n(5), 22, n(0), n(10), 1, n(-106), 10, 14];
         assert!(prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_none());
+    }
+
+    #[test]
+    fn code_after_endchar_and_stems_after_dotsection_are_left_alone() {
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let prunes = |glyph: &[u8]| {
+            prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_some()
+        };
+        // The same glyph is pruned when nothing follows its endchar.
+        assert!(prunes(&[n(-106), 10, 14]));
+        // Some readers run what follows an endchar.
+        assert!(!prunes(&[n(-106), 10, 14, n(-107), 10]));
+        // An endchar inside a subroutine, with code after the call.
+        let ends: [&[u8]; 2] = [&[14], &[n(3), n(4), 5, 11]];
+        assert!(
+            prune(
+                &mini_cff(&[&[n(-107), 10, n(-106), 10]], &ends, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        // Dotsection may become a moveto, which fixes the hints.
+        assert!(!prunes(&[
+            n(0),
+            n(10),
+            1,
+            12,
+            0,
+            n(0),
+            n(10),
+            1,
+            n(-106),
+            10,
+            14
+        ]));
     }
 
     #[test]
