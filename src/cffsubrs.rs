@@ -1,0 +1,867 @@
+//! Empty the subroutines no charstring calls, in every bare CFF font
+//! program (FontFile3 /Type1C or /CIDFontType0C).
+//!
+//! Subset fonts often keep the whole font's subroutines although their few
+//! glyphs call a handful. Every charstring is run as a Type 2 interpreter
+//! would (no arithmetic or storage operators, so the path is fixed), which
+//! finds exactly the local and global subroutines that can ever be called.
+//! The others become a bare `return`: their numbers, and so every call and
+//! every charstring, stay as they are, and the glyphs draw the same.
+//!
+//! Anything outside that model (another charstring type, an operator this
+//! does not run, a call computed or out of range, a CFF structure not read
+//! here, too much work) leaves the program untouched.
+//! Implemented from Adobe Technical Notes #5176 (CFF) and #5177 (Type 2
+//! charstrings).
+
+use lopdf::{Document, Object, ObjectId};
+
+use crate::cffsubset::{
+    CHARSET, CHARSTRING_TYPE, CHARSTRINGS, Entry, FD_ARRAY, FD_SELECT, PRIVATE, ROS, SUBRS,
+    int_value, int32, parse_dict, read_charset, read_index, set_operands, single_int, write_dict,
+    write_index,
+};
+use crate::{MAX_INFLATE, MAX_PASS_BYTES, inflate};
+
+const ENCODING: u16 = 16;
+const SYNTHETIC_BASE: u16 = 1220;
+/// Charstring operators run per program, and per document, at most.
+const MAX_STEPS: usize = 4_000_000;
+const MAX_DOC_STEPS: usize = 50_000_000;
+/// Smallest saving (uncompressed bytes) worth a rewrite: the new layout's
+/// fixed-size offsets can cost a few bytes once compressed.
+const MIN_SAVING: usize = 64;
+/// Subroutine nesting, as Type 2 allows.
+const MAX_DEPTH: usize = 10;
+const MAX_STACK: usize = 48;
+/// Font DICTs a CID font may use (FDSelect stores one byte per glyph).
+const MAX_FDS: usize = 256;
+const RETURN: &[u8] = &[11];
+
+/// Empty the uncalled subroutines of every bare CFF program. Returns
+/// (programs rewritten, uncompressed bytes dropped).
+pub(crate) fn prune_cff_subrs(doc: &mut Document, log: &mut Vec<String>) -> (usize, i64) {
+    // Programs some font descriptor embeds (orphans are dropped later).
+    let mut ids: Vec<ObjectId> = doc
+        .objects
+        .values()
+        .filter_map(|o| match o {
+            Object::Dictionary(d) => match d.get(b"FontFile3") {
+                Ok(Object::Reference(id)) => Some(*id),
+                _ => None,
+            },
+            _ => None,
+        })
+        .filter(|id| {
+            matches!(doc.objects.get(id), Some(Object::Stream(s))
+                if matches!(s.dict.get(b"Subtype"), Ok(Object::Name(n))
+                    if n == b"Type1C" || n == b"CIDFontType0C"))
+        })
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let mut budget = MAX_DOC_STEPS;
+    // Inflated bytes, across the pass.
+    let mut held = 0usize;
+    let mut rewritten = 0;
+    let mut dropped = 0i64;
+    for id in ids {
+        let Some(Object::Stream(stream)) = doc.objects.get(&id) else {
+            continue;
+        };
+        if !matches!(
+            crate::filter_names(&stream.dict)
+                .iter()
+                .map(|f| f.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [] | ["FlateDecode"]
+        ) || !matches!(stream.dict.get(b"DecodeParms"), Err(_) | Ok(Object::Null))
+        {
+            // A predictor (or parameters by reference) is not undone here.
+            continue;
+        }
+        let Ok(data) = inflate(stream, MAX_INFLATE) else {
+            continue;
+        };
+        held += data.len();
+        if held > MAX_PASS_BYTES {
+            break;
+        }
+        let Some((out, emptied)) = prune(&data, &mut budget) else {
+            continue;
+        };
+        if out.len() + MIN_SAVING > data.len() {
+            continue;
+        }
+        let Some(Object::Stream(target)) = doc.objects.get_mut(&id) else {
+            continue;
+        };
+        target.dict.remove(b"Filter");
+        target.dict.remove(b"DecodeParms");
+        target.dict.set("Length", out.len() as i64);
+        log.push(format!(
+            "font program {} {}: CFF {} uncalled subroutines emptied ({} -> {} bytes uncompressed)",
+            id.0,
+            id.1,
+            emptied,
+            data.len(),
+            out.len()
+        ));
+        dropped += (data.len() - out.len()) as i64;
+        target.set_content(out);
+        target.allows_compression = true;
+        rewritten += 1;
+    }
+    (rewritten, dropped)
+}
+
+/// A Private DICT and its local subroutines, as read.
+struct Private {
+    dict: Vec<Entry>,
+    /// Absolute byte ranges of the local subroutines, if any.
+    subrs: Option<Vec<(usize, usize)>>,
+}
+
+/// No operator appears twice. Readers disagree on which copy wins (the
+/// helpers here read the first, renderers the last), and a stale offset
+/// would survive the new layout.
+fn distinct(dict: &[Entry]) -> bool {
+    let mut ops: Vec<u16> = dict.iter().map(|e| e.op).collect();
+    ops.sort_unstable();
+    ops.windows(2).all(|w| w[0] != w[1])
+}
+
+/// An entry's single non-negative integer: Some(None) when absent, None
+/// when present in any other form (readers disagree on those, and an offset
+/// not understood would survive the new layout stale).
+fn strict_int(dict: &[Entry], op: u16) -> Option<Option<usize>> {
+    match dict.iter().any(|e| e.op == op) {
+        true => single_int(dict, op).map(Some),
+        false => Some(None),
+    }
+}
+
+fn read_private(d: &[u8], entry: &Entry) -> Option<Private> {
+    let [size, off] = entry.operands.as_slice() else {
+        return None;
+    };
+    let size = usize::try_from(int_value(size)?).ok()?;
+    let off = usize::try_from(int_value(off)?).ok()?;
+    // Readers skip a Private DICT at offset 0 or of size 0.
+    if off == 0 || size == 0 {
+        return None;
+    }
+    let dict = parse_dict(d.get(off..off.checked_add(size)?)?)?;
+    if !distinct(&dict) {
+        return None;
+    }
+    // Readers take Subrs 0 as no local subroutines.
+    let subrs = match strict_int(&dict, SUBRS)?.filter(|&rel| rel != 0) {
+        Some(rel) => Some(read_index(d, off.checked_add(rel)?)?.items),
+        None => None,
+    };
+    Some(Private { dict, subrs })
+}
+
+/// The byte length of a custom Encoding at `at`.
+fn encoding_len(d: &[u8], at: usize) -> Option<usize> {
+    let format = *d.get(at)?;
+    let n = *d.get(at + 1)? as usize;
+    let mut len = match format & 0x7F {
+        0 => 2 + n,
+        1 => 2 + 2 * n,
+        _ => return None,
+    };
+    if format & 0x80 != 0 {
+        len += 1 + 3 * *d.get(at + len)? as usize;
+    }
+    (at + len <= d.len()).then_some(len)
+}
+
+/// The Font DICT index of every glyph.
+fn read_fdselect(d: &[u8], at: usize, glyphs: usize) -> Option<Vec<usize>> {
+    match *d.get(at)? {
+        0 => Some(
+            d.get(at + 1..at + 1 + glyphs)?
+                .iter()
+                .map(|&f| f as usize)
+                .collect(),
+        ),
+        3 => {
+            let be = |p: usize| Some(u16::from_be_bytes([*d.get(p)?, *d.get(p + 1)?]) as usize);
+            let ranges = be(at + 1)?;
+            let mut out = vec![usize::MAX; glyphs];
+            for r in 0..ranges {
+                let p = at + 3 + r * 3;
+                let (first, fd, next) = (be(p)?, *d.get(p + 2)? as usize, be(p + 3)?);
+                for slot in out.get_mut(first..next.min(glyphs))? {
+                    *slot = fd;
+                }
+            }
+            (!out.contains(&usize::MAX)).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+fn bias(count: usize) -> i64 {
+    match count {
+        0..1240 => 107,
+        1240..33900 => 1131,
+        _ => 32768,
+    }
+}
+
+enum Flow {
+    Return,
+    End,
+}
+
+/// Runs charstrings, marking the subroutines they call.
+struct Runner<'a> {
+    d: &'a [u8],
+    global: &'a [(usize, usize)],
+    global_used: Vec<bool>,
+    steps: usize,
+    limit: usize,
+    /// A CID font: an accented glyph (endchar with seac arguments) would
+    /// run its components with its own Font DICT's local subroutines.
+    cid: bool,
+}
+
+/// One glyph's state: the argument stack (None for a non-integer) and the
+/// stem hints declared so far.
+struct Glyph {
+    stack: Vec<Option<i64>>,
+    stems: usize,
+    /// A hintmask or the first moveto was seen: renderers differ on stems
+    /// declared after either (some fix the hints there and ignore later
+    /// stems, then read mask bytes differently), so any such stem gives up.
+    masked: bool,
+}
+
+impl Runner<'_> {
+    /// Run `code` (a charstring or a subroutine) at nesting `depth`.
+    fn run(
+        &mut self,
+        code: (usize, usize),
+        local: Option<&[(usize, usize)]>,
+        local_used: &mut [bool],
+        glyph: &mut Glyph,
+        depth: usize,
+    ) -> Option<Flow> {
+        let d = self.d;
+        let (mut i, end) = code;
+        while i < end {
+            self.steps += 1;
+            if self.steps > self.limit || glyph.stack.len() > MAX_STACK {
+                return None;
+            }
+            let b = d[i];
+            i += 1;
+            match b {
+                32..=246 => glyph.stack.push(Some(b as i64 - 139)),
+                247..=250 => {
+                    let w = *d.get(i)? as i64;
+                    i += 1;
+                    glyph.stack.push(Some((b as i64 - 247) * 256 + w + 108));
+                }
+                251..=254 => {
+                    let w = *d.get(i)? as i64;
+                    i += 1;
+                    glyph.stack.push(Some(-(b as i64 - 251) * 256 - w - 108));
+                }
+                28 => {
+                    let v = i16::from_be_bytes([*d.get(i)?, *d.get(i + 1)?]);
+                    i += 2;
+                    glyph.stack.push(Some(v as i64));
+                }
+                255 => {
+                    let v = i32::from_be_bytes([
+                        *d.get(i)?,
+                        *d.get(i + 1)?,
+                        *d.get(i + 2)?,
+                        *d.get(i + 3)?,
+                    ]);
+                    i += 4;
+                    glyph
+                        .stack
+                        .push((v & 0xFFFF == 0).then_some((v >> 16) as i64));
+                }
+                // Stem hints: pairs of arguments (an odd one is the width).
+                1 | 3 | 18 | 23 => {
+                    if glyph.masked {
+                        return None;
+                    }
+                    glyph.stems += glyph.stack.len() / 2;
+                    glyph.stack.clear();
+                }
+                // hintmask / cntrmask: arguments left are implicit vstems;
+                // one mask bit per stem follows.
+                19 | 20 => {
+                    if glyph.masked && glyph.stack.len() >= 2 {
+                        return None;
+                    }
+                    glyph.masked |= b == 19;
+                    glyph.stems += glyph.stack.len() / 2;
+                    glyph.stack.clear();
+                    i += glyph.stems.div_ceil(8);
+                    if i > end {
+                        return None;
+                    }
+                }
+                10 | 29 => {
+                    let n = glyph.stack.pop()??;
+                    let (subrs, used): (&[(usize, usize)], &mut [bool]) = if b == 10 {
+                        (local?, &mut *local_used)
+                    } else {
+                        (self.global, &mut self.global_used[..])
+                    };
+                    let k = usize::try_from(n + bias(subrs.len())).ok()?;
+                    let sub = *subrs.get(k)?;
+                    used[k] = true;
+                    if depth >= MAX_DEPTH {
+                        return None;
+                    }
+                    if let Flow::End = self.run(sub, local, local_used, glyph, depth + 1)? {
+                        // Some readers go on past endchar.
+                        return (i == end).then_some(Flow::End);
+                    }
+                }
+                11 => return Some(Flow::Return),
+                14 => {
+                    // Seac in a CID font, or code after endchar (some
+                    // readers go on and run it).
+                    if (self.cid && glyph.stack.len() >= 4) || i != end {
+                        return None;
+                    }
+                    return Some(Flow::End);
+                }
+                12 => {
+                    let e = *d.get(i)?;
+                    i += 1;
+                    // flex, hflex, hflex1, flex1 (and the old dotsection)
+                    // draw; arithmetic and storage would make the path
+                    // depend on values, so they are not run.
+                    if !matches!(e, 0 | 34..=37) {
+                        return None;
+                    }
+                    // Dotsection may be rewritten as a zero moveto, which
+                    // fixes the hints.
+                    glyph.masked |= e == 0;
+                    glyph.stack.clear();
+                }
+                // rmoveto, hmoveto, vmoveto: hints are fixed from here.
+                4 | 21 | 22 => {
+                    glyph.masked = true;
+                    glyph.stack.clear();
+                }
+                5..=8 | 24..=27 | 30 | 31 => glyph.stack.clear(),
+                _ => return None,
+            }
+        }
+        // Fell off the end without return or endchar.
+        None
+    }
+}
+
+/// The program with its uncalled subroutines emptied, and how many were,
+/// or None if it is outside what this reads or nothing would change.
+fn prune(d: &[u8], budget: &mut usize) -> Option<(Vec<u8>, usize)> {
+    if d.len() < 4 || d[0] != 1 {
+        return None;
+    }
+    let name = read_index(d, d[2] as usize)?;
+    let top = read_index(d, name.end)?;
+    let strings = read_index(d, top.end)?;
+    let gsubrs = read_index(d, strings.end)?;
+    let [(ts, te)] = top.items.as_slice() else {
+        return None;
+    };
+    let mut top_dict = parse_dict(d.get(*ts..*te)?)?;
+    if !distinct(&top_dict)
+        || !matches!(strict_int(&top_dict, CHARSTRING_TYPE)?, None | Some(2))
+        || top_dict.iter().any(|e| e.op == SYNTHETIC_BASE)
+    {
+        return None;
+    }
+    let cs_at = single_int(&top_dict, CHARSTRINGS)?;
+    let cs = read_index(d, cs_at)?;
+    let glyphs = cs.items.len();
+    if glyphs == 0 {
+        return None;
+    }
+    let cid = top_dict.iter().any(|e| e.op == ROS);
+    // Entries the other kind of font would use: readers differ on whether
+    // they look at them, and their offsets would go stale.
+    let foreign: &[u16] = if cid {
+        &[PRIVATE, ENCODING]
+    } else {
+        &[FD_ARRAY, FD_SELECT]
+    };
+    if top_dict.iter().any(|e| foreign.contains(&e.op)) {
+        return None;
+    }
+
+    // The Private DICTs (one per Font DICT for a CID font) and which one
+    // each glyph uses.
+    let mut fd_dicts: Vec<Vec<Entry>> = Vec::new();
+    let mut privates: Vec<Private> = Vec::new();
+    let glyph_fd: Vec<usize>;
+    let mut fdselect = None;
+    if cid {
+        let fdarray = read_index(d, single_int(&top_dict, FD_ARRAY)?)?;
+        if fdarray.items.len() > MAX_FDS {
+            return None;
+        }
+        // Font DICTs may share one Subrs INDEX; each gets its own copy, so
+        // bound the copies by the program and the items by the step limit.
+        let (mut subr_items, mut subr_bytes) = (0usize, 0usize);
+        for &(s, e) in &fdarray.items {
+            let dict = parse_dict(d.get(s..e)?)?;
+            if !distinct(&dict) {
+                return None;
+            }
+            let private = read_private(d, dict.iter().find(|x| x.op == PRIVATE)?)?;
+            if let Some(items) = &private.subrs {
+                // Reading the INDEX counts against the document, like
+                // running charstrings.
+                *budget = budget.saturating_sub(items.len());
+                subr_items += items.len();
+                subr_bytes += items.last().map_or(0, |l| l.1) - items.first().map_or(0, |f| f.0);
+                if subr_items > MAX_STEPS || *budget == 0 || subr_bytes > d.len() {
+                    return None;
+                }
+            }
+            privates.push(private);
+            fd_dicts.push(dict);
+        }
+        let at = single_int(&top_dict, FD_SELECT)?;
+        glyph_fd = read_fdselect(d, at, glyphs)?;
+        if glyph_fd.iter().any(|&f| f >= privates.len()) {
+            return None;
+        }
+        fdselect = Some((at, crate::cffsubset::fdselect_len(d, at, glyphs)?));
+    } else {
+        privates.push(read_private(d, top_dict.iter().find(|x| x.op == PRIVATE)?)?);
+        glyph_fd = vec![0; glyphs];
+    }
+
+    // Run every glyph.
+    let mut runner = Runner {
+        d,
+        global: &gsubrs.items,
+        global_used: vec![false; gsubrs.items.len()],
+        steps: 0,
+        limit: MAX_STEPS.min(*budget),
+        cid,
+    };
+    let mut local_used: Vec<Vec<bool>> = privates
+        .iter()
+        .map(|p| vec![false; p.subrs.as_ref().map_or(0, |s| s.len())])
+        .collect();
+    let ran = cs.items.iter().enumerate().try_for_each(|(gid, &code)| {
+        let fd = glyph_fd[gid];
+        let mut glyph = Glyph {
+            stack: Vec::new(),
+            stems: 0,
+            masked: false,
+        };
+        let local = privates[fd].subrs.as_deref();
+        runner
+            .run(code, local, &mut local_used[fd], &mut glyph, 0)
+            .map(|_| ())
+    });
+    // Work done counts against the document, whatever the outcome.
+    *budget = budget.saturating_sub(runner.steps);
+    ran?;
+
+    let mut emptied = 0;
+    let mut keep = |items: &[(usize, usize)], used: &[bool]| -> Vec<u8> {
+        let list: Vec<&[u8]> = items
+            .iter()
+            .zip(used)
+            .map(|(&(s, e), &u)| {
+                if u || e - s <= 1 {
+                    &d[s..e]
+                } else {
+                    emptied += 1;
+                    RETURN
+                }
+            })
+            .collect();
+        write_index(&list)
+    };
+    let new_gsubrs = keep(&gsubrs.items, &runner.global_used);
+    let new_locals: Vec<Option<Vec<u8>>> = privates
+        .iter()
+        .zip(&local_used)
+        .map(|(p, used)| p.subrs.as_ref().map(|s| keep(s, used)))
+        .collect();
+    if emptied == 0 {
+        return None;
+    }
+
+    // Lay the file out again: header and names, Top DICT (offsets as fixed
+    // 5-byte integers), strings, global subroutines, then charset,
+    // encoding, FDSelect, CharStrings, FDArray, and each Private DICT
+    // followed by its local subroutines.
+    let charset = match strict_int(&top_dict, CHARSET)?.filter(|&v| v > 2) {
+        Some(at) => Some((at, read_charset(d, at, glyphs)?.1)),
+        None => None,
+    };
+    let encoding = match strict_int(&top_dict, ENCODING)?.filter(|&v| v > 1 && !cid) {
+        Some(at) => Some((at, encoding_len(d, at)?)),
+        None => None,
+    };
+    for (op, present) in [
+        (CHARSET, charset.is_some()),
+        (ENCODING, encoding.is_some()),
+        (FD_SELECT, cid),
+        (FD_ARRAY, cid),
+        (CHARSTRINGS, true),
+    ] {
+        if present {
+            set_operands(&mut top_dict, op, vec![int32(0)])?;
+        }
+    }
+    if !cid {
+        set_operands(&mut top_dict, PRIVATE, vec![int32(0), int32(0)])?;
+    }
+    for fd in &mut fd_dicts {
+        set_operands(fd, PRIVATE, vec![int32(0), int32(0)])?;
+    }
+    for p in &mut privates {
+        if p.subrs.is_some() {
+            set_operands(&mut p.dict, SUBRS, vec![int32(0)])?;
+        }
+    }
+    let top_len = write_index(&[&write_dict(&top_dict)]).len();
+    let fdarray_len = |dicts: &[Vec<Entry>]| {
+        let bytes: Vec<Vec<u8>> = dicts.iter().map(|f| write_dict(f)).collect();
+        write_index(&bytes.iter().map(|v| v.as_slice()).collect::<Vec<_>>()).len()
+    };
+
+    let head = &d[..name.end];
+    let mut pos = head.len() + top_len + (strings.end - strings.start) + new_gsubrs.len();
+    let mut place = |len: usize| {
+        let at = pos;
+        pos += len;
+        at
+    };
+    let charset_pos = charset.map(|(_, len)| place(len));
+    let encoding_pos = encoding.map(|(_, len)| place(len));
+    let fdselect_pos = fdselect.map(|(_, len)| place(len));
+    let cs_pos = place(cs.end - cs.start);
+    let fdarray_pos = cid.then(|| place(fdarray_len(&fd_dicts)));
+    let mut private_bytes = Vec::new();
+    for (k, p) in privates.iter_mut().enumerate() {
+        let len = write_dict(&p.dict).len();
+        if p.subrs.is_some() {
+            set_operands(&mut p.dict, SUBRS, vec![int32(len)])?;
+        }
+        let bytes = write_dict(&p.dict);
+        let at = place(bytes.len() + new_locals[k].as_ref().map_or(0, |s| s.len()));
+        let operands = vec![int32(bytes.len()), int32(at)];
+        if cid {
+            set_operands(&mut fd_dicts[k], PRIVATE, operands)?;
+        } else {
+            set_operands(&mut top_dict, PRIVATE, operands)?;
+        }
+        private_bytes.push(bytes);
+    }
+    for (op, at) in [
+        (CHARSET, charset_pos),
+        (ENCODING, encoding_pos),
+        (FD_SELECT, fdselect_pos),
+        (FD_ARRAY, fdarray_pos),
+        (CHARSTRINGS, Some(cs_pos)),
+    ] {
+        if let Some(at) = at {
+            set_operands(&mut top_dict, op, vec![int32(at)])?;
+        }
+    }
+
+    let mut out = Vec::with_capacity(pos);
+    out.extend_from_slice(head);
+    out.extend_from_slice(&write_index(&[&write_dict(&top_dict)]));
+    out.extend_from_slice(&d[strings.start..strings.end]);
+    out.extend_from_slice(&new_gsubrs);
+    for (at, len) in [charset, encoding, fdselect].into_iter().flatten() {
+        out.extend_from_slice(d.get(at..at + len)?);
+    }
+    out.extend_from_slice(&d[cs.start..cs.end]);
+    if cid {
+        let bytes: Vec<Vec<u8>> = fd_dicts.iter().map(|f| write_dict(f)).collect();
+        out.extend_from_slice(&write_index(
+            &bytes.iter().map(|v| v.as_slice()).collect::<Vec<_>>(),
+        ));
+    }
+    for (bytes, local) in private_bytes.iter().zip(&new_locals) {
+        out.extend_from_slice(bytes);
+        if let Some(local) = local {
+            out.extend_from_slice(local);
+        }
+    }
+    (out.len() == pos).then_some((out, emptied))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal name-keyed CFF: the given charstrings, local and global
+    /// subroutines, and a Private DICT with Subrs.
+    fn mini_cff(charstrings: &[&[u8]], local: &[&[u8]], global: &[&[u8]]) -> Vec<u8> {
+        let header = vec![1, 0, 4, 4];
+        let name = write_index(&[b"X"]);
+        let strings = write_index(&[]);
+        let gsubrs = write_index(global);
+        let cs = write_index(charstrings);
+        // Private DICT: just Subrs, which start right after it (6 bytes).
+        let mut private = int32(6);
+        private.push(SUBRS as u8);
+        let top_with = |cs_at: usize, priv_at: usize| {
+            let mut t = int32(cs_at);
+            t.push(CHARSTRINGS as u8);
+            t.extend_from_slice(&int32(private.len()));
+            t.extend_from_slice(&int32(priv_at));
+            t.push(PRIVATE as u8);
+            t
+        };
+        let top_len = write_index(&[&top_with(0, 0)]).len();
+        let cs_at = header.len() + name.len() + top_len + strings.len() + gsubrs.len();
+        let priv_at = cs_at + cs.len();
+        let mut out = header;
+        out.extend(name);
+        out.extend(write_index(&[&top_with(cs_at, priv_at)]));
+        out.extend(strings);
+        out.extend(gsubrs);
+        out.extend(cs);
+        out.extend(&private);
+        out.extend(write_index(local));
+        out
+    }
+
+    fn charstrings_and_subrs(d: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let name = read_index(d, d[2] as usize).unwrap();
+        let top = read_index(d, name.end).unwrap();
+        let strings = read_index(d, top.end).unwrap();
+        let g = read_index(d, strings.end).unwrap();
+        let (ts, te) = top.items[0];
+        let t = parse_dict(&d[ts..te]).unwrap();
+        let cs = read_index(d, single_int(&t, CHARSTRINGS).unwrap()).unwrap();
+        let p = read_private(d, t.iter().find(|e| e.op == PRIVATE).unwrap()).unwrap();
+        let items = |v: &[(usize, usize)]| v.iter().map(|&(s, e)| d[s..e].to_vec()).collect();
+        (items(&cs.items), items(&p.subrs.unwrap()), items(&g.items))
+    }
+
+    // Type 2 numbers: n in -107..=107 is the byte n + 139.
+    const fn n(v: i8) -> u8 {
+        (v as i16 + 139) as u8
+    }
+
+    #[test]
+    fn uncalled_subroutines_are_emptied() {
+        // Glyph 0 calls local 1 (bias 107: operand -106), which calls
+        // global 0 (operand -107). Local 0 and 2 and global 1 are unused.
+        let glyph: &[u8] = &[n(-106), 10, 14];
+        let local: [&[u8]; 3] = [
+            &[n(1), n(2), 5, 11],
+            &[n(-107), 29, 11],
+            &[n(3), n(4), 5, 11],
+        ];
+        let global: [&[u8]; 2] = [&[n(5), n(6), 5, 11], &[n(7), n(8), 5, 11]];
+        let d = mini_cff(&[glyph], &local, &global);
+        let (out, emptied) = prune(&d, &mut MAX_DOC_STEPS.clone()).unwrap();
+        assert_eq!(emptied, 3);
+        let (cs, l, g) = charstrings_and_subrs(&out);
+        assert_eq!(cs, vec![glyph.to_vec()]);
+        assert_eq!(l, vec![vec![11], local[1].to_vec(), vec![11]]);
+        assert_eq!(g, vec![global[0].to_vec(), vec![11]]);
+        // Nothing left to empty.
+        assert!(prune(&out, &mut MAX_DOC_STEPS.clone()).is_none());
+    }
+
+    #[test]
+    fn hint_mask_bytes_are_skipped_inside_subroutines() {
+        // Two stems, then a subroutine whose hintmask is followed by one
+        // mask byte that reads as callsubr (10) if not skipped.
+        let glyph: &[u8] = &[n(0), n(10), n(20), n(10), 1, n(-107), 10, 14];
+        let local: [&[u8]; 2] = [&[19, 10, n(1), n(2), 5, 11], &[n(1), n(2), 5, 11]];
+        let d = mini_cff(&[glyph], &local, &[]);
+        let (out, emptied) = prune(&d, &mut MAX_DOC_STEPS.clone()).unwrap();
+        assert_eq!(emptied, 1);
+        let (_, l, _) = charstrings_and_subrs(&out);
+        assert_eq!(l, vec![local[0].to_vec(), vec![11]]);
+    }
+
+    #[test]
+    fn stems_after_a_hint_mask_are_left_alone() {
+        // Renderers disagree on stems declared after a hintmask (one
+        // ignores them and reads fewer mask bytes, running 0x0A as a call).
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        // Implicit vstems at a second hintmask: 8 stems, then a ninth
+        // would make the mask 2 bytes (0x20 0x0A) instead of 1, hiding
+        // the call (0x0A) to subroutine 0 from the runner.
+        let mut second: Vec<u8> = (0..16).map(n).collect();
+        second.extend_from_slice(&[1, 19, 0xFF, n(0), n(10), n(-107), 19, 0x20, 10, 14]);
+        assert!(
+            prune(
+                &mini_cff(&[&second], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        // An explicit stem after one.
+        let explicit: &[u8] = &[n(0), n(10), 18, 19, 0x80, n(0), n(10), 3, n(-106), 10, 14];
+        assert!(
+            prune(
+                &mini_cff(&[explicit], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn stems_after_the_first_moveto_are_left_alone() {
+        // Some renderers fix the hints at the first moveto: a stem after
+        // it changes how they read the next mask, as after a hintmask.
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let glyph: &[u8] = &[n(0), n(10), 1, n(5), 22, n(0), n(10), 1, n(-106), 10, 14];
+        assert!(prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_none());
+    }
+
+    #[test]
+    fn code_after_endchar_and_stems_after_dotsection_are_left_alone() {
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let prunes = |glyph: &[u8]| {
+            prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_some()
+        };
+        // The same glyph is pruned when nothing follows its endchar.
+        assert!(prunes(&[n(-106), 10, 14]));
+        // Some readers run what follows an endchar.
+        assert!(!prunes(&[n(-106), 10, 14, n(-107), 10]));
+        // An endchar inside a subroutine, with code after the call.
+        let ends: [&[u8]; 2] = [&[14], &[n(3), n(4), 5, 11]];
+        assert!(
+            prune(
+                &mini_cff(&[&[n(-107), 10, n(-106), 10]], &ends, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        // Dotsection may become a moveto, which fixes the hints.
+        assert!(!prunes(&[
+            n(0),
+            n(10),
+            1,
+            12,
+            0,
+            n(0),
+            n(10),
+            1,
+            n(-106),
+            10,
+            14
+        ]));
+    }
+
+    #[test]
+    fn unusual_dict_operands_are_refused() {
+        // CharstringType 2 as a real (30 = real, 0x2F = "2" then end),
+        // or with two operands: readers take different values.
+        let real = parse_dict(&[30, 0x2F, 12, 6]).unwrap();
+        assert_eq!(strict_int(&real, CHARSTRING_TYPE), None);
+        let two = parse_dict(&[n(1), n(2), 12, 6]).unwrap();
+        assert_eq!(strict_int(&two, CHARSTRING_TYPE), None);
+        let one = parse_dict(&[n(2), 12, 6]).unwrap();
+        assert_eq!(strict_int(&one, CHARSTRING_TYPE), Some(Some(2)));
+        assert_eq!(strict_int(&one, CHARSET), Some(None));
+    }
+
+    #[test]
+    fn repeated_dict_operators_are_refused() {
+        // CharStrings (17) twice: readers disagree on which copy wins.
+        let mut dict = int32(100);
+        dict.push(17);
+        assert!(distinct(&parse_dict(&dict).unwrap()));
+        dict.extend_from_slice(&int32(200));
+        dict.push(17);
+        assert!(!distinct(&parse_dict(&dict).unwrap()));
+    }
+
+    #[test]
+    fn the_document_budget_is_shared() {
+        let glyph: &[u8] = &[n(-107), 10, 14];
+        let local: [&[u8]; 2] = [&[n(1), n(2), 5, 11], &[n(3), n(4), 5, 11]];
+        let d = mini_cff(&[glyph], &local, &[]);
+        let mut budget = 5;
+        assert!(prune(&d, &mut budget).is_none());
+        assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn computed_paths_are_left_alone() {
+        // `add` (12 10) before a call: the subroutine number is computed.
+        let glyph: &[u8] = &[n(-107), n(0), 12, 10, 10, 14];
+        let local: [&[u8]; 2] = [&[11], &[n(1), n(2), 5, 11]];
+        assert!(prune(&mini_cff(&[glyph], &local, &[]), &mut MAX_DOC_STEPS.clone()).is_none());
+        // A call out of range, and a charstring with no endchar.
+        assert!(
+            prune(
+                &mini_cff(&[&[n(50), 10, 14]], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+        assert!(
+            prune(
+                &mini_cff(&[&[n(1), n(2), 5]], &local, &[]),
+                &mut MAX_DOC_STEPS.clone()
+            )
+            .is_none()
+        );
+    }
+
+    /// Prune every `*.cff` in CFF_PRUNE_IN into CFF_PRUNE_OUT (an outside
+    /// oracle then compares the outlines):
+    ///
+    ///   CFF_PRUNE_IN=dir CFF_PRUNE_OUT=dir \
+    ///     cargo test --release cff_prune_files -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cff_prune_files() {
+        let (Ok(input), Ok(output)) = (
+            std::env::var("CFF_PRUNE_IN"),
+            std::env::var("CFF_PRUNE_OUT"),
+        ) else {
+            return;
+        };
+        let mut names: Vec<_> = std::fs::read_dir(&input)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "cff"))
+            .collect();
+        names.sort();
+        for path in names {
+            let data = std::fs::read(&path).unwrap();
+            let name = path.file_name().unwrap();
+            match prune(&data, &mut usize::MAX.clone()) {
+                Some((out, emptied)) => {
+                    println!(
+                        "{}: {} -> {} ({} emptied)",
+                        name.display(),
+                        data.len(),
+                        out.len(),
+                        emptied
+                    );
+                    std::fs::write(std::path::Path::new(&output).join(name), out).unwrap();
+                }
+                None => println!("{}: untouched", name.display()),
+            }
+        }
+    }
+}
