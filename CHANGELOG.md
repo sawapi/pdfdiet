@@ -1,13 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
-- Subroutines no glyph calls are emptied in every embedded CFF font
-  (Type1C and CID-keyed). Subset fonts often keep the whole font's
-  subroutines although their few glyphs call a handful: a music score
-  with 21 such fonts shrinks from 95% to 78% of its size. Every glyph
-  draws the same (subroutine numbers and charstrings are unchanged); a
-  font this cannot follow exactly is left as it is.
+### All builds
+
+- Subroutines no glyph calls are emptied in embedded bare CFF font
+  programs (Type1C and CID-keyed). Subset fonts often keep the whole
+  font's subroutines although their few glyphs call a handful: a music
+  score whose 14 such fonts carry them comes out at 78% of its original
+  size instead of 95%. Every glyph draws the same (subroutine numbers and
+  charstrings are unchanged); a font this cannot follow exactly is left
+  as it is. The log reports each program as
+  `font program N G: CFF K uncalled subroutines emptied (A -> B bytes uncompressed)`.
 
 ## 0.4.0
 

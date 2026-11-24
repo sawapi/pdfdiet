@@ -58,8 +58,9 @@ for line in &stats.log {
   downsamples only images above the target.
 - **Re-encodes** gray, RGB and CMYK images as JPEG, bilevel scans
   losslessly as CCITT G4, and keeps the original whenever it is smaller.
-- **Optimizes fonts**: merges duplicate subsets, drops tables and glyphs
-  no page can reach, and converts Type 1 programs to the more compact CFF.
+- **Optimizes fonts**: merges duplicate subsets, drops tables, glyphs and
+  subroutines no page can reach, and converts Type 1 programs to the more
+  compact CFF.
 - **Cleans up structure**: merges identical streams, drops editing data
   and rewrites the file with compressed object streams.
 - **Leaves alone** what it cannot decode exactly. It refuses encrypted

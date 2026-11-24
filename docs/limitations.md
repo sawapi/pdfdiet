@@ -30,5 +30,6 @@ Documents that are refused outright (encrypted, owner-password protected,
 signed) are listed in [Safety](safety.md#refused-documents).
 
 A file that is mostly vector graphics and already-compressed text, such
-as sheet music or a typeset document without pictures, may hardly shrink:
-there are no images to resample, and its streams are already compressed.
+as a typeset document without pictures, may hardly shrink: there are no
+images to resample, and its streams are already compressed (unless its
+embedded CFF fonts carry subroutines no glyph calls).
