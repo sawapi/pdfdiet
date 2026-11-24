@@ -61,6 +61,9 @@ phone often carry their GPS position this way.
   so they are never used.
 - **Glyph slots** past the last one the document can reach are dropped,
   without renumbering anything.
+- **Subroutines** that no glyph calls are emptied in CFF programs (subsets
+  often keep all of the full font's). Every subroutine keeps its number,
+  so each glyph draws the same.
 - **Type 1** programs are converted to CFF, which is more compact, with the
   numeric precision of the outlines kept.
 

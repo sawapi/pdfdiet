@@ -38,8 +38,8 @@ obj 5 0: 2561176 -> 266632 bytes (downsampled to 1240x1754) [gray]
 
 The first lines are the log: one line per change, and per image or font
 that was left alone, with the reason. The output is written only when
-compression succeeds; give it a different name from the input, which is
-not checked.
+compression succeeds, through a temporary file renamed into place, so
+`-o` may name the input.
 
 | Option | Default | |
 |---|---|---|
